@@ -244,8 +244,8 @@ pub fn formatCellValue(allocator: std.mem.Allocator, val: parquet.Value) ![]cons
     return switch (val) {
         .null_val => try allocator.dupe(u8, "null"),
         .bool_val => |v| try allocator.dupe(u8, if (v) "true" else "false"),
-        .int32_val => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
-        .int64_val => |v| try std.fmt.allocPrint(allocator, "{}", .{v}),
+        .int32_val => |v| try allocator.print("{}", .{v}),
+        .int64_val => |v| try allocator.print("{}", .{v}),
         .float_val => |v| try formatFloat(allocator, f32, v),
         .double_val => |v| try formatFloat(allocator, f64, v),
         .bytes_val => |v| try formatStringForTable(allocator, v),
@@ -265,7 +265,7 @@ fn formatFloat(allocator: std.mem.Allocator, comptime T: type, v: T) ![]const u8
     } else if (std.math.isNan(v)) {
         return try allocator.dupe(u8, "nan");
     }
-    return try std.fmt.allocPrint(allocator, "{d}", .{v});
+    return try allocator.print("{d}", .{v});
 }
 
 fn formatStringForTable(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
@@ -288,7 +288,7 @@ fn formatStringForTable(allocator: std.mem.Allocator, data: []const u8) ![]const
     }
 
     if (data.len > 50) {
-        return try std.fmt.allocPrint(allocator, "{s}...", .{data[0..47]});
+        return try allocator.print("{s}...", .{data[0..47]});
     }
     return try allocator.dupe(u8, data);
 }

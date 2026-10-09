@@ -167,6 +167,8 @@ pub fn mapError(err: anyerror) c_int {
         error.EndOfData,
         error.InvalidFieldType,
         error.InvalidListType,
+        error.InvalidMapType,
+        error.NestingTooDeep,
         error.VarIntTooLong,
         error.IntegerOverflow,
         error.Overflow,

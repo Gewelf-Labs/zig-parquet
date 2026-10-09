@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-zig-parquet is a native Parquet library written in Zig 0.16.0. It provides read/write support for Parquet files, a C ABI, and a CLI tool (`pqi`). Read `README.md` for the full feature list and API examples.
+zig-parquet is a native Parquet library written in Zig 0.17.0. It provides read/write support for Parquet files, a C ABI, and a CLI tool (`pqi`). Read `README.md` for the full feature list and API examples.
 
 ## Project Structure
 
@@ -62,13 +62,13 @@ make clean                             # Remove .zig-cache and zig-out everywher
 
 `CODECS` values: `all` (default), `none`, `zig-only`, `c-only`, or comma-separated list from `zstd,snappy,gzip,lz4,brotli` (Zig) and `c-zstd,c-snappy,c-gzip,c-lz4,c-brotli` (C/C++).
 
-## Zig 0.16.0 — Key API Patterns
+## Zig 0.17.0 — Key API Patterns
 
 Always search the codebase for existing patterns before writing new code.
 
 ### std.Io Interface
 
-Zig 0.16 uses a unified `std.Io` interface for all I/O. File operations require an `io: std.Io` parameter.
+Zig 0.17 uses a unified `std.Io` interface for all I/O. File operations require an `io: std.Io` parameter.
 
 - **In `main`**: Accept `std.process.Init` — provides `init.io`, `init.gpa`
 - **In tests**: Use `std.testing.io`
@@ -125,6 +125,19 @@ try stdout_writer.interface.flush();
 ```zig
 // std.meta.intToEnum was removed — use std.enums.fromInt (returns ?T)
 const codec = std.enums.fromInt(CompressionCodec, v) orelse return error.InvalidCodec;
+
+// @intFromEnum / @enumFromInt were removed in 0.17
+const raw: u8 = @backingInt(status);
+const restored: Status = @fromBackingInt(raw);
+```
+
+### Target and formatting
+
+```zig
+const arch = @import("builtin").target.cpu.arch;
+
+// std.fmt.allocPrint moved onto the allocator
+const name = try allocator.print("name_{d}", .{i});
 ```
 
 ### Custom Format Functions

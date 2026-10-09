@@ -5,6 +5,7 @@
 //! Edge-case tests always run (Zig-only round-trips) with cross-validation when available.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig");
 const build_options = @import("build_options");
 const c_gzip = @import("../core/compress/c_gzip.zig");
 const zig_gzip = @import("../core/compress/gzip.zig");
@@ -60,7 +61,7 @@ test "cross-impl: C compress, Zig decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Hello, World! This is a cross-implementation gzip test." ** 20;
+    const original = comptime repeat.bytes("Hello, World! This is a cross-implementation gzip test.", 20);
 
     const compressed = try c_gzip.compress(allocator, original);
     defer allocator.free(compressed);
@@ -75,7 +76,7 @@ test "cross-impl: Zig compress, C decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Hello, World! This is a cross-implementation gzip test." ** 20;
+    const original = comptime repeat.bytes("Hello, World! This is a cross-implementation gzip test.", 20);
 
     const compressed = try zig_gzip.compress(allocator, original);
     defer allocator.free(compressed);
@@ -90,7 +91,7 @@ test "cross-impl: bidirectional round-trip (all 4 combinations)" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "ABCDEFGH" ** 200;
+    const original = comptime repeat.bytes("ABCDEFGH", 200);
 
     const c_compressed = try c_gzip.compress(allocator, original);
     defer allocator.free(c_compressed);
@@ -158,8 +159,8 @@ test "cross-impl: concatenated gzip streams" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const part1 = "First gzip member data. " ** 50;
-    const part2 = "Second gzip member data. " ** 50;
+    const part1 = comptime repeat.bytes("First gzip member data. ", 50);
+    const part2 = comptime repeat.bytes("Second gzip member data. ", 50);
     const total_len = part1.len + part2.len;
 
     // Concatenate two independently compressed streams (C compressor)
@@ -188,8 +189,8 @@ test "cross-impl: concatenated Zig-compressed streams via C decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const part1 = "Zig compressed part one. " ** 40;
-    const part2 = "Zig compressed part two. " ** 40;
+    const part1 = comptime repeat.bytes("Zig compressed part one. ", 40);
+    const part2 = comptime repeat.bytes("Zig compressed part two. ", 40);
     const total_len = part1.len + part2.len;
 
     const z1 = try zig_gzip.compress(allocator, part1);
@@ -226,7 +227,7 @@ test "edge: small data" {
 
 test "edge: repetitive data" {
     const allocator = std.testing.allocator;
-    try zigRoundTrip(allocator, "AAAA" ** 1000);
+    try zigRoundTrip(allocator, comptime repeat.bytes("AAAA", 1000));
 }
 
 test "edge: large data" {

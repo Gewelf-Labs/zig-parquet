@@ -50,6 +50,8 @@ pub const DecodingError = error{
     EndOfData,
     InvalidFieldType,
     InvalidListType,
+    InvalidMapType,
+    NestingTooDeep,
     VarIntTooLong,
     IntegerOverflow,
     LengthTooLong,

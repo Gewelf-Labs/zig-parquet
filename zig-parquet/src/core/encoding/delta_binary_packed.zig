@@ -77,6 +77,14 @@ pub fn Decoder(comptime T: type) type {
                 return allocator.alloc(T, 0) catch return error.OutOfMemory;
             }
 
+            // A bit_width 0 mini-block of 32 values costs at least 1 header byte
+            // per mini-block plus the block's min_delta varint, so 128 values
+            // per input byte is a generous ceiling.
+            // ponytail: heuristic cap; thread AllocationLimits from parquet_reader.zig
+            // into the delta decoders for a proper bound.
+            const value_cap = std.math.mul(usize, self.data.len, 128) catch std.math.maxInt(usize);
+            if (self.total_values > value_cap) return error.InvalidValueCount;
+
             // Allocate result
             const result = allocator.alloc(T, self.total_values) catch return error.OutOfMemory;
             errdefer allocator.free(result);
@@ -99,11 +107,12 @@ pub fn Decoder(comptime T: type) type {
                 // Validate min_delta fits in T
                 const min_delta = std.math.cast(T, min_delta_raw) orelse return error.InvalidValueCount;
 
-                // Read bit widths for each mini-block
-                if (self.pos + self.num_mini_blocks > self.data.len) {
+                // Read bit widths for each mini-block.
+                // pos <= data.len is an invariant of this decoder.
+                if (self.num_mini_blocks > self.data.len - self.pos) {
                     return error.InsufficientData;
                 }
-            const bit_widths = safe.slice(self.data, self.pos, self.num_mini_blocks) catch return error.InsufficientData;
+                const bit_widths = safe.slice(self.data, self.pos, self.num_mini_blocks) catch return error.InsufficientData;
                 self.pos += self.num_mini_blocks;
 
                 // Decode each mini-block
@@ -121,9 +130,11 @@ pub fn Decoder(comptime T: type) type {
                             values_decoded += 1;
                         }
                     } else {
-                        // Bit-packed values
+                        if (bit_width > 64) return error.InvalidHeader;
+                        // block_size is capped at 1<<20 in readHeader, so this multiply fits in usize.
                         const mini_block_bytes = (mini_block_size * bit_width + 7) / 8;
-                        if (self.pos + mini_block_bytes > self.data.len) {
+                        // pos <= data.len is an invariant of this decoder.
+                        if (mini_block_bytes > self.data.len - self.pos) {
                             return error.InsufficientData;
                         }
                         const packed_data = safe.slice(self.data, self.pos, mini_block_bytes) catch return error.InsufficientData;
@@ -151,28 +162,29 @@ pub fn Decoder(comptime T: type) type {
             self.total_values = std.math.cast(usize, total_values_raw) orelse return error.InvalidValueCount;
             self.first_value = std.math.cast(T, first_value_raw) orelse return error.InvalidValueCount;
 
-            // Validate header
-            if (self.block_size == 0 or self.block_size % 128 != 0) {
+            // Validate header. Writers use 128 or 256; nothing larger is sanctioned,
+            // and the cap keeps mini_block_size * bit_width from overflowing usize.
+            if (self.block_size == 0 or self.block_size % 128 != 0 or self.block_size > (1 << 20)) {
                 return error.InvalidBlockSize;
             }
             if (self.num_mini_blocks == 0) {
                 return error.InvalidMiniBlockCount;
             }
             const mini_block_size = self.block_size / self.num_mini_blocks;
-            if (mini_block_size % 32 != 0) {
+            if (mini_block_size == 0 or mini_block_size % 32 != 0) {
                 return error.InvalidMiniBlockCount;
             }
         }
 
         fn readUnsignedVarint(self: *Self) Error!u64 {
             var result: u64 = 0;
-            var shift: u6 = 0;
+            var shift: u7 = 0;
 
             while (self.pos < self.data.len) {
                 const b = self.data[self.pos];
                 self.pos += 1;
 
-                result |= @as(u64, b & 0x7F) << shift;
+                result |= @as(u64, b & 0x7F) << @as(u6, std.math.cast(u6, shift) orelse return error.VarintOverflow);
 
                 if (b & 0x80 == 0) {
                     return result;
@@ -205,11 +217,9 @@ pub fn Decoder(comptime T: type) type {
         ) Error!void {
             _ = self;
 
-            // Validate bit_width is reasonable (max 64 bits for u64 values)
-            if (bit_width > 64) return error.InvalidHeader;
-
+            // bit_width <= 64: caller rejects wider values before the mini-block multiply
             var bit_pos: usize = 0;
-            const mask = if (bit_width >= 64) ~@as(u64, 0) else (@as(u64, 1) << (safe.castTo(u6, bit_width) catch unreachable)) - 1; // bit_width <= 64 from check above
+            const mask = if (bit_width >= 64) ~@as(u64, 0) else (@as(u64, 1) << (safe.castTo(u6, bit_width) catch unreachable)) - 1; // caller rejects bit_width > 64
 
             for (output) |*out| {
                 // Extract bit_width bits starting at bit_pos
@@ -220,10 +230,10 @@ pub fn Decoder(comptime T: type) type {
                 var value: u64 = 0;
                 const bytes_needed = (bit_offset + bit_width + 7) / 8;
 
-                        const bytes_to_read = @min(bytes_needed, packed_data.len - byte_pos);
-                        for (0..@min(bytes_to_read, 8)) |i| {
-                            value |= @as(u64, packed_data[byte_pos + i]) << (safe.castTo(u6, i * 8) catch unreachable); // i < 8, so i * 8 <= 56, fits u6
-                        }
+                const bytes_to_read = @min(bytes_needed, packed_data.len - byte_pos);
+                for (0..@min(bytes_to_read, 8)) |i| {
+                    value |= @as(u64, packed_data[byte_pos + i]) << (safe.castTo(u6, i * 8) catch unreachable); // i < 8, so i * 8 <= 56, fits u6
+                }
 
                 // Shift and mask
                 value = (value >> bit_offset) & mask;
@@ -353,4 +363,47 @@ test "delta binary packed i64" {
     try std.testing.expectEqual(@as(i64, 100), result[0]);
     try std.testing.expectEqual(@as(i64, 101), result[1]);
     try std.testing.expectEqual(@as(i64, 102), result[2]);
+}
+
+test "delta binary packed varint overflow" {
+    const allocator = std.testing.allocator;
+    const data = @as([11]u8, @splat(0x80));
+    try std.testing.expectError(error.VarintOverflow, decodeInt32(allocator, &data));
+}
+
+test "delta binary packed rejects huge block size" {
+    const allocator = std.testing.allocator;
+    // block_size = 2^62, num_mini_blocks = 1, total = 2, first = 0, bit_width 2
+    const data = [_]u8{
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40,
+        0x01, 0x02, 0x00, 0x00, 0x02,
+    };
+    try std.testing.expectError(error.InvalidBlockSize, decodeInt32(allocator, &data));
+}
+
+test "delta binary packed rejects zero mini block" {
+    const allocator = std.testing.allocator;
+    // block_size = 128, num_mini_blocks = 200 → mini_block_size = 0
+    const data = [_]u8{
+        0x80, 0x01,
+        0xC8, 0x01,
+        0x01, 0x00,
+    };
+    try std.testing.expectError(error.InvalidMiniBlockCount, decodeInt32(allocator, &data));
+}
+
+test "delta binary packed rejects unbounded value count" {
+    const allocator = std.testing.allocator;
+    // block_size = 128, num_mini_blocks = 4, total = 10_000_000, first = 0, 8 bytes after
+    const data = [_]u8{
+        0x80, 0x01,
+        0x04, 0x80,
+        0xAD, 0xE2,
+        0x04, 0x00,
+        0,    0,
+        0,    0,
+        0,    0,
+        0,    0,
+    };
+    try std.testing.expectError(error.InvalidValueCount, decodeInt32(allocator, &data));
 }

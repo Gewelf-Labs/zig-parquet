@@ -28,6 +28,7 @@ pub const RowGroup = struct {
             switch (field.field_id) {
                 1 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var columns_list = try allocator.alloc(ColumnChunk, list_header.size);
                     for (0..list_header.size) |i| {
                         columns_list[i] = try ColumnChunk.parse(allocator, reader);
@@ -38,6 +39,7 @@ pub const RowGroup = struct {
                 3 => rg.num_rows = try reader.readI64(),
                 4 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var sorting_list = try allocator.alloc(SortingColumn, list_header.size);
                     for (0..list_header.size) |i| {
                         sorting_list[i] = try SortingColumn.parse(reader);

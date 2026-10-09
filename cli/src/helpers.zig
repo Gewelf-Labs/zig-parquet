@@ -212,4 +212,3 @@ pub fn getLeafElement(schema: []const parquet.format.SchemaElement, column_index
     }
     return null;
 }
-

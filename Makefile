@@ -19,12 +19,12 @@ help:
 	@echo "Targets (all accept CODECS=<spec> OPT=<ReleaseSmall|ReleaseFast|...>):"
 	@echo "  make build             Build library + CLI"
 	@echo "  make lib               Build library (honors CODECS, OPT)"
-	@echo "  make cli               Build pqi CLI (honors OPT)"
+	@echo "  make cli               Build pqi CLI (honors CODECS, OPT)"
 	@echo "  make test              Library + CLI tests (honors CODECS, OPT)"
 	@echo "  make test-lib          Library tests only (honors CODECS, OPT)"
-	@echo "  make test-cli          CLI tests only (honors OPT)"
-	@echo "  make example NAME=...  Build an example (honors OPT)"
-	@echo "  make wasm              Verify WASM targets compile and link"
+	@echo "  make test-cli          CLI tests only (honors CODECS, OPT)"
+	@echo "  make example NAME=...  Build an example (honors CODECS, OPT)"
+	@echo "  make wasm              Verify WASM targets compile and link (no C codecs unless CODECS is set)"
 	@echo "  make validate-wild     Validate pqi against wild files (failures only)"
 	@echo "  make validate-wild-all Validate pqi against wild files (show all)"
 	@echo "  make fmt               zig fmt across sources"
@@ -38,7 +38,7 @@ help:
 	@echo "  make example NAME=basic"
 	@echo "  make example NAME=wasm_demo OPT=ReleaseSmall"
 	@echo ""
-	@echo "Examples (NAME=): basic, gen-eeg, gen-power-grid, large_file,"
+	@echo "Examples (NAME=): basic, gen-power-grid, large_file,"
 	@echo "                  wasm_demo, wasm_freestanding"
 	@echo ""
 	@echo "CODECS values: all (default), none, zig-only, c-only,"
@@ -54,7 +54,7 @@ lib:
 
 .PHONY: cli
 cli:
-	cd $(CLI_DIR) && zig build $(OPT_FLAG)
+	cd $(CLI_DIR) && zig build $(CODEC_FLAG) $(OPT_FLAG)
 
 .PHONY: test
 test: test-lib test-cli
@@ -65,17 +65,17 @@ test-lib:
 
 .PHONY: test-cli
 test-cli:
-	cd $(CLI_DIR) && zig build test $(OPT_FLAG)
+	cd $(CLI_DIR) && zig build test $(CODEC_FLAG) $(OPT_FLAG)
 
 .PHONY: example
 example:
-	@test -n "$(NAME)" || { echo "usage: make example NAME=<basic|gen-eeg|gen-power-grid|large_file|wasm_demo|wasm_freestanding>"; exit 1; }
+	@test -n "$(NAME)" || { echo "usage: make example NAME=<basic|gen-power-grid|large_file|wasm_demo|wasm_freestanding>"; exit 1; }
 	@test -d $(EXAMPLES_DIR)/$(NAME) || { echo "no such example: $(NAME)"; ls $(EXAMPLES_DIR); exit 1; }
-	cd $(EXAMPLES_DIR)/$(NAME) && zig build $(OPT_FLAG)
+	cd $(EXAMPLES_DIR)/$(NAME) && zig build $(CODEC_FLAG) $(OPT_FLAG)
 
 .PHONY: wasm
 wasm:
-	cd $(LIB_DIR) && zig build wasm-smoke
+	cd $(LIB_DIR) && zig build wasm-smoke $(if $(CODECS),$(CODEC_FLAG),-Dcodecs=none)
 
 .PHONY: validate-wild
 validate-wild: cli

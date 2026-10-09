@@ -63,7 +63,7 @@ const crc = std.hash.crc;
 
 /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
 fn computePageCrc(data: []const u8) i32 {
-    return @bitCast(crc.Crc32.hash(data));
+    return @bitCast(crc.@"CRC-32/ISO-HDLC".hash(data));
 }
 
 /// Safely cast i32 page size/count to usize, validating non-negative.
@@ -1025,7 +1025,10 @@ pub const DynamicReader = struct {
             if (projected_top_indices) |indices| {
                 var needed = false;
                 for (indices) |pi| {
-                    if (pi == top_idx) { needed = true; break; }
+                    if (pi == top_idx) {
+                        needed = true;
+                        break;
+                    }
                 }
                 if (!needed) continue;
             }

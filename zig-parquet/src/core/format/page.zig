@@ -53,13 +53,13 @@ pub const DataPageHeader = struct {
         try writer.writeI32(self.num_values);
 
         try writer.writeFieldHeader(2, .i32);
-        try writer.writeI32(@intFromEnum(self.encoding));
+        try writer.writeI32(@backingInt(self.encoding));
 
         try writer.writeFieldHeader(3, .i32);
-        try writer.writeI32(@intFromEnum(self.definition_level_encoding));
+        try writer.writeI32(@backingInt(self.definition_level_encoding));
 
         try writer.writeFieldHeader(4, .i32);
-        try writer.writeI32(@intFromEnum(self.repetition_level_encoding));
+        try writer.writeI32(@backingInt(self.repetition_level_encoding));
 
         if (self.statistics) |*stats| {
             try writer.writeFieldHeader(5, .struct_);
@@ -149,7 +149,7 @@ pub const DictionaryPageHeader = struct {
         try writer.writeI32(self.num_values);
 
         try writer.writeFieldHeader(2, .i32);
-        try writer.writeI32(@intFromEnum(self.encoding));
+        try writer.writeI32(@backingInt(self.encoding));
 
         if (self.is_sorted) {
             try writer.writeBoolField(3, true);
@@ -206,7 +206,7 @@ pub const PageHeader = struct {
         writer.resetFieldTracking();
 
         try writer.writeFieldHeader(1, .i32);
-        try writer.writeI32(@intFromEnum(self.type_));
+        try writer.writeI32(@backingInt(self.type_));
 
         try writer.writeFieldHeader(2, .i32);
         try writer.writeI32(self.uncompressed_page_size);

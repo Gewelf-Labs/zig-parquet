@@ -324,6 +324,8 @@ const Deps = struct {
 };
 
 fn resolveDeps(b: *std.Build, codecs: Codecs) Deps {
+    // C codec tarballs are lazy so Zig-only builds do not fetch them. `dependency`
+    // exits configuration for a retry once a missing tarball is actually required.
     return .{
         .lz4 = if (codecs.lz4) b.dependency("lz4", .{}) else null,
         .brotli = if (codecs.brotli) b.dependency("brotli", .{}) else null,

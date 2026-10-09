@@ -328,7 +328,7 @@ pub const DynamicWriter = struct {
         for (self.pending_columns.items) |col| {
             if (std.mem.eql(u8, col.name, name)) return error.DuplicateColumnName;
         }
-        const duped = self.allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+        const duped = self.allocator.dupeSentinel(u8, name, 0) catch return error.OutOfMemory;
         errdefer self.allocator.free(duped);
         self.pending_columns.append(self.allocator, .{
             .name = duped,
@@ -345,7 +345,7 @@ pub const DynamicWriter = struct {
         for (self.pending_columns.items) |col| {
             if (std.mem.eql(u8, col.name, name)) return error.DuplicateColumnName;
         }
-        const duped = self.allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+        const duped = self.allocator.dupeSentinel(u8, name, 0) catch return error.OutOfMemory;
         errdefer self.allocator.free(duped);
         self.pending_columns.append(self.allocator, .{
             .name = duped,
@@ -947,8 +947,16 @@ pub const DynamicWriter = struct {
                     .double_ => flushColumnTyped(f64, allocator, writer, path, items, n, self.current_offset, codec, is_optional, opts, pib_ptr) catch |e| return mapFlushError(e),
                     .bytes => flushColumnBytes(allocator, writer, path, items, n, self.current_offset, codec, is_optional, opts) catch |e| return mapFlushError(e),
                     .fixed_bytes => flushColumnFixedBytes(
-                        allocator, writer, path, items, n, self.current_offset, codec,
-                        self.column_type_lengths[col] orelse return error.InvalidState, is_optional, opts,
+                        allocator,
+                        writer,
+                        path,
+                        items,
+                        n,
+                        self.current_offset,
+                        codec,
+                        self.column_type_lengths[col] orelse return error.InvalidState,
+                        is_optional,
+                        opts,
                     ) catch |e| return mapFlushError(e),
                     .nested => return error.InvalidState,
                 };
@@ -1072,7 +1080,7 @@ pub const DynamicWriter = struct {
 
             const opts = self.resolveOpts(col, path);
             const leaf_codec = if (self.path_properties.count() > 0) blk: {
-                const joined = joinPath(allocator, path) catch break :blk default_codec;
+                const joined = joinPath(allocator, path) catch return error.OutOfMemory;
                 defer allocator.free(joined);
                 if (self.path_properties.get(joined)) |pp| {
                     break :blk pp.compression orelse default_codec;
@@ -1081,10 +1089,16 @@ pub const DynamicWriter = struct {
             } else default_codec;
 
             const result = column_writer.writeColumnChunkFromValues(
-                allocator, writer, path,
-                flat_col.values.items, flat_col.def_levels.items, flat_col.rep_levels.items,
-                levels.max_def, levels.max_rep,
-                self.current_offset, leaf_codec,
+                allocator,
+                writer,
+                path,
+                flat_col.values.items,
+                flat_col.def_levels.items,
+                flat_col.rep_levels.items,
+                levels.max_def,
+                levels.max_rep,
+                self.current_offset,
+                leaf_codec,
                 .{
                     .use_dictionary = opts.use_dictionary,
                     .encoding = opts.encoding_override,
@@ -1189,8 +1203,15 @@ pub const DynamicWriter = struct {
             };
         }
         return column_writer.writeColumnChunkOptionalWithPathArray(
-            bool, allocator, writer, path, typed,
-            is_optional, offset, codec, opts.write_page_checksum,
+            bool,
+            allocator,
+            writer,
+            path,
+            typed,
+            is_optional,
+            offset,
+            codec,
+            opts.write_page_checksum,
         );
     }
 
@@ -1217,8 +1238,17 @@ pub const DynamicWriter = struct {
 
         if (opts.encoding_override) |enc| {
             return column_writer.writeColumnChunkOptionalWithEncoding(
-                T, allocator, writer, path, typed,
-                is_optional, offset, codec, enc, opts.max_page_size, opts.write_page_checksum,
+                T,
+                allocator,
+                writer,
+                path,
+                typed,
+                is_optional,
+                offset,
+                codec,
+                enc,
+                opts.max_page_size,
+                opts.write_page_checksum,
                 page_index_builder,
             );
         }
@@ -1230,15 +1260,30 @@ pub const DynamicWriter = struct {
                 else => format.Encoding.plain,
             };
             return column_writer.writeColumnChunkOptionalWithEncoding(
-                T, allocator, writer, path, typed,
-                is_optional, offset, codec, enc, opts.max_page_size, opts.write_page_checksum,
+                T,
+                allocator,
+                writer,
+                path,
+                typed,
+                is_optional,
+                offset,
+                codec,
+                enc,
+                opts.max_page_size,
+                opts.write_page_checksum,
                 page_index_builder,
             );
         }
 
         return column_writer.writeColumnChunkDictOptionalWithPathArray(
-            T, allocator, writer, path, typed,
-            is_optional, offset, codec,
+            T,
+            allocator,
+            writer,
+            path,
+            typed,
+            is_optional,
+            offset,
+            codec,
             opts.dictionary_size_limit,
             opts.dictionary_cardinality_threshold,
             opts.max_page_size,
@@ -1267,21 +1312,42 @@ pub const DynamicWriter = struct {
 
         if (opts.encoding_override) |enc| {
             return column_writer.writeColumnChunkByteArrayOptionalWithEncoding(
-                allocator, writer, path, typed,
-                is_optional, offset, codec, enc, opts.max_page_size, opts.write_page_checksum,
+                allocator,
+                writer,
+                path,
+                typed,
+                is_optional,
+                offset,
+                codec,
+                enc,
+                opts.max_page_size,
+                opts.write_page_checksum,
             );
         }
 
         if (!opts.use_dictionary) {
             return column_writer.writeColumnChunkByteArrayOptionalWithEncoding(
-                allocator, writer, path, typed,
-                is_optional, offset, codec, .plain, opts.max_page_size, opts.write_page_checksum,
+                allocator,
+                writer,
+                path,
+                typed,
+                is_optional,
+                offset,
+                codec,
+                .plain,
+                opts.max_page_size,
+                opts.write_page_checksum,
             );
         }
 
         return column_writer.writeColumnChunkByteArrayDictOptionalWithPathArray(
-            allocator, writer, path, typed,
-            is_optional, offset, codec,
+            allocator,
+            writer,
+            path,
+            typed,
+            is_optional,
+            offset,
+            codec,
             opts.dictionary_size_limit,
             opts.dictionary_cardinality_threshold,
             opts.max_page_size,
@@ -1310,8 +1376,15 @@ pub const DynamicWriter = struct {
         }
         const fixed_len = safe.castTo(u32, type_length) catch return error.InvalidTypeLength;
         return column_writer.writeColumnChunkFixedByteArrayOptionalWithPathArray(
-            allocator, writer, path, typed,
-            fixed_len, is_optional, offset, codec, opts.write_page_checksum,
+            allocator,
+            writer,
+            path,
+            typed,
+            fixed_len,
+            is_optional,
+            offset,
+            codec,
+            opts.write_page_checksum,
         );
     }
 

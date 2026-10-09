@@ -34,7 +34,7 @@ Grep-verifiable: `rg "safe.cast" src/` audits all external data casts.
 
 ### `@intCast` Elimination Status
 
-All production code uses `safe.cast()` — zero `@intCast` remaining:
+Production readers and writers use `safe.cast()` — zero `@intCast` on file-provided data outside the compression codecs. Codec decoder paths still use `@intCast` (pending): `brotli.zig`, `zstd.zig`. The remaining `@intCast` in `gzip.zig`, `lz4.zig`, and `snappy.zig` are encoder-side only (gzip decodes via `std.compress.flate`).
 
 | Area | Files | `@intCast` Count |
 |------|-------|-----------------|
@@ -43,7 +43,7 @@ All production code uses `safe.cast()` — zero `@intCast` remaining:
 | Encoding | `encoding/*.zig` | 0 |
 | Thrift | `thrift/*.zig` | 0 |
 | Format | `format/*.zig` | 0 |
-| Compress | `compress/*.zig` | 0 |
+| Compress | `compress/*.zig` | decoder pending (`brotli.zig`, `zstd.zig`); encoder-only elsewhere |
 | Arrow Batch | `arrow_batch.zig` | 0 |
 | C API | `api/c/*.zig` | 0 |
 | WASM API | `api/wasm/*.zig` | 0 |
@@ -109,7 +109,7 @@ Extreme nanosecond values produce day counts outside i32 range. Replaced `catch 
 
 ### Decompression Safety
 
-**Gzip decompression** (`src/compress/gzip.zig`):
+**Gzip decompression** (`src/compress/c_gzip.zig`):
 - Maximum decompression size limit (256MB)
 - Compression ratio limit (1000x)
 - Safe casts for C API parameters

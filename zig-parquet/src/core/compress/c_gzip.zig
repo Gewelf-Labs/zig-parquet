@@ -6,9 +6,49 @@
 const std = @import("std");
 
 const safe = @import("../safe.zig");
-const c = @cImport({
-    @cInclude("zlib.h");
-});
+
+/// zlib 1.3.1, matching the pinned tarball. `deflateInit2` / `inflateInit2` are
+/// macros; the exported symbols are the underscored functions.
+const zlib_version: [*:0]const u8 = "1.3.1";
+
+const c = struct {
+    const Z_NO_FLUSH: c_int = 0;
+    const Z_FINISH: c_int = 4;
+    const Z_OK: c_int = 0;
+    const Z_STREAM_END: c_int = 1;
+    const Z_DEFAULT_COMPRESSION: c_int = -1;
+    const Z_DEFLATED: c_int = 8;
+    const Z_DEFAULT_STRATEGY: c_int = 0;
+
+    const alloc_func = ?*const fn (?*anyopaque, c_uint, c_uint) callconv(.c) ?*anyopaque;
+    const free_func = ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void;
+
+    const z_stream = extern struct {
+        next_in: [*c]u8,
+        avail_in: c_uint,
+        total_in: c_ulong,
+        next_out: [*c]u8,
+        avail_out: c_uint,
+        total_out: c_ulong,
+        msg: [*c]const u8,
+        state: ?*anyopaque,
+        zalloc: alloc_func,
+        zfree: free_func,
+        @"opaque": ?*anyopaque,
+        data_type: c_int,
+        adler: c_ulong,
+        reserved: c_ulong,
+    };
+
+    extern fn deflateBound(strm: ?*z_stream, sourceLen: c_ulong) c_ulong;
+    extern fn deflateInit2_(strm: *z_stream, level: c_int, method: c_int, windowBits: c_int, memLevel: c_int, strategy: c_int, version: [*:0]const u8, stream_size: c_int) c_int;
+    extern fn deflate(strm: *z_stream, flush: c_int) c_int;
+    extern fn deflateEnd(strm: *z_stream) c_int;
+    extern fn inflateInit2_(strm: *z_stream, windowBits: c_int, version: [*:0]const u8, stream_size: c_int) c_int;
+    extern fn inflate(strm: *z_stream, flush: c_int) c_int;
+    extern fn inflateReset(strm: *z_stream) c_int;
+    extern fn inflateEnd(strm: *z_stream) c_int;
+};
 
 pub const Error = error{
     CompressionError,
@@ -50,13 +90,15 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     };
 
     // deflateInit2 with gzip format (windowBits = 15 + 16)
-    var result = c.deflateInit2(
+    var result = c.deflateInit2_(
         &stream,
         c.Z_DEFAULT_COMPRESSION, // compression level
         c.Z_DEFLATED, // method
         GZIP_WINDOW_BITS, // windowBits: 15 + 16 for gzip
         8, // memLevel (default)
         c.Z_DEFAULT_STRATEGY, // strategy
+        zlib_version,
+        @sizeOf(c.z_stream),
     );
     if (result != c.Z_OK) {
         allocator.free(dst);
@@ -126,7 +168,7 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     };
 
     // inflateInit2 with gzip format (windowBits = 15 + 16)
-    var result = c.inflateInit2(&stream, GZIP_WINDOW_BITS);
+    var result = c.inflateInit2_(&stream, GZIP_WINDOW_BITS, zlib_version, @sizeOf(c.z_stream));
     if (result != c.Z_OK) {
         allocator.free(dst);
         return error.DecompressionError;

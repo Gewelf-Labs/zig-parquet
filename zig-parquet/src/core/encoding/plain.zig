@@ -18,7 +18,7 @@ const Int96 = types.Int96;
 pub fn decodeBool(data: []const u8, index: usize) error{EndOfData}!bool {
     const byte_idx = index / 8;
     if (byte_idx >= data.len) return error.EndOfData;
-        const bit_idx: u3 = safe.castTo(u3, index % 8) catch return error.EndOfData;
+    const bit_idx: u3 = safe.castTo(u3, index % 8) catch return error.EndOfData;
     return (data[byte_idx] >> bit_idx) & 1 == 1;
 }
 
@@ -61,8 +61,8 @@ pub const ByteArrayResult = struct {
 };
 
 pub fn decodeByteArray(data: []const u8) !ByteArrayResult {
-    const len = try decodeU32(data);
-    if (data.len < 4 + len) return error.EndOfData;
+    const len: usize = try decodeU32(data);
+    if (data.len < 4 or data.len - 4 < len) return error.EndOfData;
     return .{
         .value = data[4..][0..len],
         .bytes_read = 4 + len,
@@ -175,6 +175,10 @@ test "decode byte array" {
     const result = try decodeByteArray(&data);
     try std.testing.expectEqualStrings("hello", result.value);
     try std.testing.expectEqual(@as(usize, 9), result.bytes_read);
+}
+
+test "decode byte array rejects length that overflows u32 add" {
+    try std.testing.expectError(error.EndOfData, decodeByteArray(&.{ 0xFF, 0xFF, 0xFF, 0xFF }));
 }
 
 test "PlainDecoder i32" {

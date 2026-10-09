@@ -92,7 +92,6 @@ pub fn flattenMap(
     maps: []const Optional([]const MapEntry(K, V)),
     value_max_def: u8,
 ) !FlattenedMap(K, V) {
-
     std.debug.assert(value_max_def >= 2);
 
     // First pass: count total slots, keys, and values (checked arithmetic)

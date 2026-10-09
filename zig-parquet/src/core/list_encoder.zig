@@ -61,7 +61,6 @@ pub fn flattenList(
     lists: []const Optional([]const Optional(T)),
     max_def_level: u8,
 ) !FlattenedList(T) {
-
     if (max_def_level < 2) return error.OutOfMemory;
 
     // First pass: count total slots and values (checked arithmetic)

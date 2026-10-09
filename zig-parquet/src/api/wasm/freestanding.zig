@@ -120,7 +120,7 @@ const StreamHandle = struct {
     rg_index: usize,
 };
 
-var handle_table: [MAX_HANDLES]HandleSlot = [_]HandleSlot{.{ .empty = {} }} ** MAX_HANDLES;
+var handle_table: [MAX_HANDLES]HandleSlot = @as([MAX_HANDLES]HandleSlot, @splat(.{ .empty = {} }));
 
 fn allocHandleSlot() i32 {
     for (&handle_table, 0..) |*slot, i| {
@@ -2034,10 +2034,12 @@ fn schemaNodeFromTypeInfo(handle: *RowWriterHandle, info: TypeInfo) !*const Sche
         .float_ => handle.allocSchemaNode(.{ .float = .{ .logical = info.logical } }),
         .double_ => handle.allocSchemaNode(.{ .double = .{ .logical = info.logical } }),
         .bytes => handle.allocSchemaNode(.{ .byte_array = .{ .logical = info.logical } }),
-        .fixed_bytes => handle.allocSchemaNode(.{ .fixed_len_byte_array = .{
-            .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
-            .logical = info.logical,
-        } }),
+        .fixed_bytes => handle.allocSchemaNode(.{
+            .fixed_len_byte_array = .{
+                .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
+                .logical = info.logical,
+            },
+        }),
         .nested => error.InvalidArgument,
     };
 }

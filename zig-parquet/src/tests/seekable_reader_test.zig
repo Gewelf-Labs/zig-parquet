@@ -276,7 +276,11 @@ test "Reader.initFromBuffer reads real Parquet file" {
 
     // Read the Parquet file into memory
     // Schema: bool_col, int32_col, int64_col, float_col, double_col, string_col, binary_col, fixed_binary_col
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet", allocator, @enumFromInt(10_000_000),
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
+        allocator,
+        @fromBackingInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -304,7 +308,7 @@ test "Reader.initFromBuffer matches file-based reading" {
     const file_path = "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet";
 
     // Read file into memory
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @enumFromInt(10_000_000));
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @fromBackingInt(10_000_000));
     defer allocator.free(file_data);
 
     // Initialize from buffer
@@ -350,7 +354,11 @@ test "DynamicReader.initFromBuffer reads real Parquet file" {
     const allocator = std.testing.allocator;
 
     // Read the Parquet file into memory
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet", allocator, @enumFromInt(10_000_000),
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
+        allocator,
+        @fromBackingInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -377,7 +385,11 @@ test "DynamicReader.initFromBuffer reads real Parquet file with row iteration" {
 
     // Read the Parquet file into memory
     // Schema: bool_col, int32_col, int64_col, float_col, double_col, string_col, binary_col, fixed_binary_col
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet", allocator, @enumFromInt(10_000_000),
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
+        allocator,
+        @fromBackingInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -400,7 +412,11 @@ test "Reader.initFromBuffer with compressed file" {
 
     // Read a zstd-compressed Parquet file into memory
     // Schema: repeated (string), sequence (i64)
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, "../test-files-arrow/compression/compression_zstd.parquet", allocator, @enumFromInt(10_000_000),
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "../test-files-arrow/compression/compression_zstd.parquet",
+        allocator,
+        @fromBackingInt(10_000_000),
     );
     defer allocator.free(file_data);
 

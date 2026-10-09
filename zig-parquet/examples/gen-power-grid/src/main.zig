@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
 
         if (batch_idx == num_batches - 1) {
             const elapsed_ns = timer_start.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds;
-    const elapsed_s = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / 1_000_000_000.0;
+            const elapsed_s = @as(f64, @floatFromInt(@as(i64, @intCast(elapsed_ns)))) / 1_000_000_000.0;
             const rate = @as(f64, @floatFromInt(samples_written)) / elapsed_s;
             std.debug.print("  {} samples written ({d:.0} samples/sec)\n", .{ samples_written, rate });
         }

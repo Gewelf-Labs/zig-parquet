@@ -26,7 +26,7 @@ pub const Value = value_mod.Value;
 
 /// Extract and validate bit_width from dictionary-encoded data.
 /// Bit width must be 0-31 to fit in u5 for RLE decoding.
-fn extractBitWidth(data: []const u8, offset: usize) error{InvalidBitWidth, EndOfData}!u5 {
+fn extractBitWidth(data: []const u8, offset: usize) error{ InvalidBitWidth, EndOfData }!u5 {
     if (offset >= data.len) return error.EndOfData;
     const raw = data[offset];
     if (raw > 31) return error.InvalidBitWidth;
@@ -598,7 +598,7 @@ fn decodeDictInt96WithDefLevels(
             if (ctx.int96_dict.?.get(dict_idx)) |bytes| {
                 result[i] = .{ .value = Int96.fromBytes(bytes) };
             } else {
-                result[i] = .{ .value = Int96.fromBytes([_]u8{0} ** 12) };
+                result[i] = .{ .value = Int96.fromBytes(@as([12]u8, @splat(0))) };
             }
         } else {
             result[i] = .{ .null_value = {} };
@@ -1756,8 +1756,13 @@ fn decodeDynamicBoolRLE(
 ) !DynamicDecodeResult {
     // Parse definition/repetition levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
 
@@ -2296,8 +2301,13 @@ fn decodeDynamicInt96(
 
     // Decode levels first to get data offset
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
 
@@ -2450,18 +2460,23 @@ fn decodeDeltaBinaryPacked(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     const physical_type = schema_elem.type_ orelse return error.InvalidArgument;
-    
+
     // Decode levels first to get data offset
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     if (physical_type == .int32) {
         const decoded = delta_binary_packed.decodeInt32(allocator, values_data) catch |err| {
             return switch (err) {
@@ -2470,7 +2485,7 @@ fn decodeDeltaBinaryPacked(
             };
         };
         defer allocator.free(decoded);
-        
+
         // Map decoded values to output, respecting nulls
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
@@ -2493,7 +2508,7 @@ fn decodeDeltaBinaryPacked(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2510,7 +2525,7 @@ fn decodeDeltaBinaryPacked(
     } else {
         return error.InvalidArgument;
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2530,18 +2545,23 @@ fn decodeDeltaLengthByteArray(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     _ = schema_elem;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     // Decode using delta length byte array decoder
     var decode_result = delta_length_byte_array.decode(allocator, values_data) catch |err| {
         return switch (err) {
@@ -2550,7 +2570,7 @@ fn decodeDeltaLengthByteArray(
         };
     };
     defer decode_result.deinit();
-    
+
     // Map decoded values to output
     var decoded_idx: usize = 0;
     for (0..num_values) |i| {
@@ -2565,7 +2585,7 @@ fn decodeDeltaLengthByteArray(
             values[i] = .{ .null_val = {} };
         }
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2585,18 +2605,23 @@ fn decodeDeltaByteArray(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     _ = schema_elem;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     // Decode using delta byte array decoder
     var decode_result = delta_byte_array.decode(allocator, values_data) catch |err| {
         return switch (err) {
@@ -2605,7 +2630,7 @@ fn decodeDeltaByteArray(
         };
     };
     defer decode_result.deinit();
-    
+
     // Map decoded values to output
     var decoded_idx: usize = 0;
     for (0..num_values) |i| {
@@ -2620,7 +2645,7 @@ fn decodeDeltaByteArray(
             values[i] = .{ .null_val = {} };
         }
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2640,18 +2665,23 @@ fn decodeByteStreamSplit(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     const physical_type = schema_elem.type_ orelse return error.InvalidArgument;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     if (physical_type == .float) {
         const decoded = byte_stream_split.decodeFloat32Alloc(allocator, values_data, levels_info.non_null_count) catch |err| {
             return switch (err) {
@@ -2660,7 +2690,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2682,7 +2712,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2704,7 +2734,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2726,7 +2756,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2753,7 +2783,7 @@ fn decodeByteStreamSplit(
             for (decoded) |slice| allocator.free(slice);
             allocator.free(decoded);
         }
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2772,11 +2802,10 @@ fn decodeByteStreamSplit(
     } else {
         return error.InvalidArgument;
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
         .rep_levels = levels_info.rep_levels,
     };
 }
-

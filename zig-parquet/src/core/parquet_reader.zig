@@ -72,7 +72,6 @@ pub const AllocationLimits = struct {
     };
 };
 
-
 /// Result of parsing a Parquet file footer
 pub const FooterInfo = struct {
     metadata: format.FileMetaData,
@@ -222,7 +221,7 @@ pub const PageIterator = struct {
 
     /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
     fn computePageCrc(data: []const u8) i32 {
-        return @bitCast(crc.Crc32.hash(data));
+        return @bitCast(crc.@"CRC-32/ISO-HDLC".hash(data));
     }
 
     /// Initialize a page iterator

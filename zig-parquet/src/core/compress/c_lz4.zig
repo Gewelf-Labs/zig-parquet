@@ -1,13 +1,15 @@
 //! LZ4 compression/decompression for Parquet
 //!
-//! Uses the LZ4 C library via @cImport.
+//! Uses the LZ4 C library.
 //! Parquet uses LZ4_RAW codec (raw LZ4 block format, no framing).
 
 const std = @import("std");
 const safe = @import("../safe.zig");
-const c = @cImport({
-    @cInclude("lz4.h");
-});
+const c = struct {
+    extern fn LZ4_compressBound(inputSize: c_int) c_int;
+    extern fn LZ4_compress_default(src: [*]const u8, dst: [*]u8, srcSize: c_int, dstCapacity: c_int) c_int;
+    extern fn LZ4_decompress_safe(src: [*]const u8, dst: [*]u8, compressedSize: c_int, dstCapacity: c_int) c_int;
+};
 
 pub const Error = error{
     CompressionError,
@@ -37,7 +39,7 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 
     // Resize to actual compressed size
     const resized = allocator.realloc(dst, safe.castTo(usize, compressed_size) catch return error.CompressionError) catch {
-        return dst[0..safe.castTo(usize, compressed_size) catch return error.CompressionError];
+        return dst[0 .. safe.castTo(usize, compressed_size) catch return error.CompressionError];
     };
     return resized;
 }

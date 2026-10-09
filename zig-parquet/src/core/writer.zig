@@ -55,7 +55,6 @@ pub const WriteTargetWriter = write_target.WriteTargetWriter;
 pub const WriteError = write_target.WriteError;
 pub const BackendCleanup = @import("parquet_reader.zig").BackendCleanup;
 
-
 /// Writer state
 const State = enum {
     initialized,
@@ -258,13 +257,7 @@ pub const Writer = struct {
 
     /// Map Zig type to Parquet PhysicalType at comptime
     fn physicalTypeFor(comptime T: type) format.PhysicalType {
-        return if (T == i32) .int32
-        else if (T == i64) .int64
-        else if (T == f32) .float
-        else if (T == f64) .double
-        else if (T == bool) .boolean
-        else if (T == []const u8) .byte_array
-        else @compileError("Unsupported column type: " ++ @typeName(T));
+        return if (T == i32) .int32 else if (T == i64) .int64 else if (T == f32) .float else if (T == f64) .double else if (T == bool) .boolean else if (T == []const u8) .byte_array else @compileError("Unsupported column type: " ++ @typeName(T));
     }
 
     /// Write a column (non-nullable)

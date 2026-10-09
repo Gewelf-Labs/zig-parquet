@@ -35,6 +35,8 @@ const thrift_errors = error{
     ListTooLong,
     InvalidFieldType,
     InvalidListType,
+    InvalidMapType,
+    NestingTooDeep,
     InvalidBoundaryOrder,
     InvalidBoolEncoding,
 };
@@ -275,7 +277,7 @@ test "PageIndexReader: read single OffsetIndex" {
 }
 
 test "PageIndexReader: returns null when chunk has no index" {
-    const file = [_]u8{0} ** 100;
+    const file = @as([100]u8, @splat(0));
     var src = BufferSource{ .data = &file };
     var pir = PageIndexReader.init(testing.allocator, src.reader());
 

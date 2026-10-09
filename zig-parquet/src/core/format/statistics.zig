@@ -154,7 +154,6 @@ pub const Statistics = struct {
         const bits = std.mem.readInt(u64, bytes[0..8], .little);
         return @bitCast(bits);
     }
-
 };
 
 /// Bounding box for geospatial statistics (Thrift struct BoundingBox)
@@ -276,6 +275,7 @@ pub const GeospatialStatistics = struct {
                 1 => stats.bbox = try BoundingBox.parse(reader),
                 2 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var types = try allocator.alloc(i32, list_header.size);
                     for (0..list_header.size) |i| {
                         types[i] = try reader.readI32();

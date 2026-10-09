@@ -477,7 +477,7 @@ test "round-trip validates compression actually works" {
     const file_path = "roundtrip_compression_check.parquet";
 
     // Write a large column with compressible data (all same value)
-    const values = [_]i64{42} ** 1000;
+    const values = @as([1000]i64, @splat(42));
 
     // Write uncompressed
     {
@@ -2009,7 +2009,7 @@ test "round-trip DynamicReader reads INT32-backed decimal columns (low-level wri
     }
 
     {
-        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int32.parquet", allocator, @enumFromInt(1024 * 1024));
+        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int32.parquet", allocator, @fromBackingInt(1024 * 1024));
         defer allocator.free(buf);
 
         var reader = try parquet.openBufferDynamic(allocator, buf, .{});
@@ -2050,7 +2050,7 @@ test "round-trip DynamicReader reads INT64-backed decimal columns (low-level wri
     }
 
     {
-        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int64.parquet", allocator, @enumFromInt(1024 * 1024));
+        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int64.parquet", allocator, @fromBackingInt(1024 * 1024));
         defer allocator.free(buf);
 
         var reader = try parquet.openBufferDynamic(allocator, buf, .{});
@@ -2598,9 +2598,9 @@ test "round-trip statistics fixed byte array logical types" {
     const f16_bytes_three: [2]u8 = @bitCast(f16_three);
     const f16_values = [_][]const u8{ &f16_bytes_one, &f16_bytes_half, &f16_bytes_three };
 
-    const dec_small = [_]u8{0} ** 15 ++ [_]u8{1};
-    const dec_medium = [_]u8{0} ** 15 ++ [_]u8{100};
-    const dec_large = [_]u8{0} ** 14 ++ [_]u8{ 1, 0 };
+    const dec_small = @as([15]u8, @splat(0)) ++ [_]u8{1};
+    const dec_medium = @as([15]u8, @splat(0)) ++ [_]u8{100};
+    const dec_large = @as([14]u8, @splat(0)) ++ [_]u8{ 1, 0 };
     const dec_values = [_][]const u8{ &dec_medium, &dec_small, &dec_large };
     const dec_expected_min = dec_small;
     const dec_expected_max = dec_large;

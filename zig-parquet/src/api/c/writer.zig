@@ -11,7 +11,7 @@ const arrow_batch = @import("../../core/arrow_batch.zig");
 const format = @import("../../core/format.zig");
 const safe = @import("../../core/safe.zig");
 
-const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 const ArrowSchema = handles.ArrowSchema;
 const ArrowArray = handles.ArrowArray;

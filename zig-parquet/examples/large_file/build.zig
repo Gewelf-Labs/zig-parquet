@@ -3,10 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const codecs = b.option([]const u8, "codecs", "Compression codecs (default: all). See zig-parquet for values.") orelse "all";
 
     const parquet_dep = b.dependency("parquet", .{
         .target = target,
         .optimize = optimize,
+        .codecs = codecs,
     });
     const parquet_mod = parquet_dep.module("parquet");
 

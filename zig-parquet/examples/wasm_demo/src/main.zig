@@ -10,7 +10,6 @@ const parquet = @import("parquet");
 const Optional = parquet.Optional;
 const ColumnDef = parquet.ColumnDef;
 
-
 fn testLowLevelWriter(allocator: std.mem.Allocator) ![]u8 {
     const columns = [_]ColumnDef{
         .{ .name = "bool_col", .type_ = .boolean, .optional = true },

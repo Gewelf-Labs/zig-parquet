@@ -40,6 +40,7 @@ pub const ColumnMetaData = struct {
                 1 => meta.type_ = try PhysicalType.fromInt(try reader.readI32()),
                 2 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var encodings = try allocator.alloc(Encoding, list_header.size);
                     for (0..list_header.size) |i| {
                         encodings[i] = try Encoding.fromInt(try reader.readI32());
@@ -48,6 +49,7 @@ pub const ColumnMetaData = struct {
                 },
                 3 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var paths = try allocator.alloc([]const u8, list_header.size);
                     for (0..list_header.size) |i| {
                         paths[i] = try allocator.dupe(u8, try reader.readString());
@@ -77,12 +79,12 @@ pub const ColumnMetaData = struct {
         writer.resetFieldTracking();
 
         try writer.writeFieldHeader(1, .i32);
-        try writer.writeI32(@intFromEnum(self.type_));
+        try writer.writeI32(@backingInt(self.type_));
 
         try writer.writeFieldHeader(2, .list);
         try writer.writeListHeader(.i32, safe.castTo(u32, self.encodings.len) catch return error.IntegerOverflow);
         for (self.encodings) |enc| {
-            try writer.writeI32(@intFromEnum(enc));
+            try writer.writeI32(@backingInt(enc));
         }
 
         try writer.writeFieldHeader(3, .list);
@@ -92,7 +94,7 @@ pub const ColumnMetaData = struct {
         }
 
         try writer.writeFieldHeader(4, .i32);
-        try writer.writeI32(@intFromEnum(self.codec));
+        try writer.writeI32(@backingInt(self.codec));
 
         try writer.writeFieldHeader(5, .i64);
         try writer.writeI64(self.num_values);

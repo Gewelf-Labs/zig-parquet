@@ -819,4 +819,3 @@ pub fn writeDataPageByteArrayOptionalWithEncoding(
     }
     return combineDefLevelsAndValues(allocator, is_defined.items, encoded_values, values.len);
 }
-

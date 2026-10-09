@@ -90,7 +90,7 @@ pub fn formatStringValue(allocator: std.mem.Allocator, data: []const u8) ![]cons
     if (is_printable) {
         // Truncate long strings
         if (data.len > 50) {
-            return try std.fmt.allocPrint(allocator, "{s}...", .{data[0..47]});
+            return try allocator.print("{s}...", .{data[0..47]});
         }
         return try allocator.dupe(u8, data);
     } else {

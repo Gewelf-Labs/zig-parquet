@@ -34,7 +34,7 @@ test "CRC32 matches expected value" {
     // Test that our CRC32 implementation matches expected values
     // "123456789" has a well-known CRC32 checksum
     const test_data = "123456789";
-    const checksum = crc.Crc32.hash(test_data);
+    const checksum = crc.@"CRC-32/ISO-HDLC".hash(test_data);
 
     // CRC32 IEEE polynomial: "123456789" -> 0xCBF43926
     try std.testing.expectEqual(@as(u32, 0xCBF43926), checksum);

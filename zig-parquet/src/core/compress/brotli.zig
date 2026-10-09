@@ -5,6 +5,7 @@
 //! Reference: https://www.rfc-editor.org/rfc/rfc7932
 
 const std = @import("std");
+const repeated = @import("../../repeat.zig");
 
 pub const Error = error{
     CompressionError,
@@ -12,7 +13,6 @@ pub const Error = error{
     OutOfMemory,
     InvalidSize,
 };
-
 
 // =========================================================================
 // Bit Writer (for encoder) — LSB-first
@@ -219,7 +219,7 @@ const HuffmanTable = struct {
 
 fn buildHuffmanTable(allocator: std.mem.Allocator, code_lengths: []const u8, alphabet_size: u16) Error!HuffmanTable {
     // Count code lengths
-    var bl_count: [16]u16 = .{0} ** 16;
+    var bl_count: [16]u16 = @splat(0);
     for (code_lengths) |cl| {
         if (cl > 15) return error.DecompressionError;
         bl_count[cl] += 1;
@@ -227,7 +227,7 @@ fn buildHuffmanTable(allocator: std.mem.Allocator, code_lengths: []const u8, alp
     bl_count[0] = 0;
 
     // Compute next_code
-    var next_code: [16]u32 = .{0} ** 16;
+    var next_code: [16]u32 = @splat(0);
     var code: u32 = 0;
     for (1..16) |bits| {
         code = (code + bl_count[bits - 1]) << 1;
@@ -268,7 +268,7 @@ fn buildHuffmanTable(allocator: std.mem.Allocator, code_lengths: []const u8, alp
     }
 
     // Compute per-primary-key secondary table bit widths
-    var secondary_table_bits: [PRIMARY_TABLE_SIZE]u8 = .{0} ** PRIMARY_TABLE_SIZE;
+    var secondary_table_bits: [PRIMARY_TABLE_SIZE]u8 = @splat(0);
     var table_size: usize = PRIMARY_TABLE_SIZE;
     if (max_bits > PRIMARY_TABLE_BITS) {
         var temp_codes: [16]u32 = next_code;
@@ -296,7 +296,7 @@ fn buildHuffmanTable(allocator: std.mem.Allocator, code_lengths: []const u8, alp
     }
 
     // Build secondary table offset map
-    var secondary_offsets: [PRIMARY_TABLE_SIZE]u16 = .{0} ** PRIMARY_TABLE_SIZE;
+    var secondary_offsets: [PRIMARY_TABLE_SIZE]u16 = @splat(0);
     if (max_bits > PRIMARY_TABLE_BITS) {
         var offset: u16 = @intCast(PRIMARY_TABLE_SIZE);
         for (0..PRIMARY_TABLE_SIZE) |i| {
@@ -454,43 +454,43 @@ const CONTEXT_SIGNED: u2 = 3;
 // 4 modes x 512 entries (256 for p1, 256 for p2). Context ID = table[mode*512 + p1] | table[mode*512 + 256 + p2].
 const kContextLookup = [2048]u8{
     // CONTEXT_LSB6, p1 part
-     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
     // CONTEXT_LSB6, p2 part (all zeros)
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
     // CONTEXT_MSB6, p1 part
-     0,  0,  0,  0,  1,  1,  1,  1,  2,  2,  2,  2,  3,  3,  3,  3,
-     4,  4,  4,  4,  5,  5,  5,  5,  6,  6,  6,  6,  7,  7,  7,  7,
-     8,  8,  8,  8,  9,  9,  9,  9, 10, 10, 10, 10, 11, 11, 11, 11,
+    0,  0,  0,  0,  1,  1,  1,  1,  2,  2,  2,  2,  3,  3,  3,  3,
+    4,  4,  4,  4,  5,  5,  5,  5,  6,  6,  6,  6,  7,  7,  7,  7,
+    8,  8,  8,  8,  9,  9,  9,  9,  10, 10, 10, 10, 11, 11, 11, 11,
     12, 12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15, 15, 15,
     16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19,
     20, 20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22, 23, 23, 23, 23,
@@ -505,63 +505,63 @@ const kContextLookup = [2048]u8{
     56, 56, 56, 56, 57, 57, 57, 57, 58, 58, 58, 58, 59, 59, 59, 59,
     60, 60, 60, 60, 61, 61, 61, 61, 62, 62, 62, 62, 63, 63, 63, 63,
     // CONTEXT_MSB6, p2 part (all zeros)
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
     // CONTEXT_UTF8, p1 part
-     0,  0,  0,  0,  0,  0,  0,  0,  0,  4,  4,  0,  0,  4,  0,  0,
-     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-     8, 12, 16, 12, 12, 20, 12, 16, 24, 28, 12, 12, 32, 12, 36, 12,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  4,  4,  0,  0,  4,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    8,  12, 16, 12, 12, 20, 12, 16, 24, 28, 12, 12, 32, 12, 36, 12,
     44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 32, 32, 24, 40, 28, 12,
     12, 48, 52, 52, 52, 48, 52, 52, 52, 48, 52, 52, 52, 52, 52, 48,
     52, 52, 52, 52, 52, 48, 52, 52, 52, 52, 52, 24, 12, 28, 12, 12,
     12, 56, 60, 60, 60, 56, 60, 60, 60, 56, 60, 60, 60, 60, 60, 56,
-    60, 60, 60, 60, 60, 56, 60, 60, 60, 60, 60, 24, 12, 28, 12,  0,
+    60, 60, 60, 60, 60, 56, 60, 60, 60, 60, 60, 24, 12, 28, 12, 0,
     // UTF8 continuation byte range
-    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+    0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,
+    0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,
+    0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,
+    0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,
     // UTF8 lead byte range
-    2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
-    2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
-    2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
-    2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
+    2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,
+    2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,
+    2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,
+    2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,  2,  3,
     // CONTEXT_UTF8, p2 part
     // ASCII range
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1,
-    1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1,
-    1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  1,  1,  1,  1,  1,  1,
+    1,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  1,  1,  1,  1,  1,
+    1,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  1,  1,  1,  1,  0,
     // UTF8 continuation byte range
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
     // UTF8 lead byte range
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
     // CONTEXT_SIGNED, p1 part
-     0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    0,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,  8,
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
     16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
@@ -578,22 +578,22 @@ const kContextLookup = [2048]u8{
     40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
     48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 56,
     // CONTEXT_SIGNED, p2 part
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7,
+    0,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,
+    4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+    4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,
+    6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  7,
 };
 
 fn getContextId(mode: u2, p1: u8, p2: u8) u8 {
@@ -668,14 +668,14 @@ const BlockLengthPrefixEntry = struct {
 };
 
 const kBlockLengthPrefixCode = [26]BlockLengthPrefixEntry{
-    .{ .offset = 1, .nbits = 2 },     .{ .offset = 5, .nbits = 2 },     .{ .offset = 9, .nbits = 2 },
-    .{ .offset = 13, .nbits = 2 },    .{ .offset = 17, .nbits = 3 },    .{ .offset = 25, .nbits = 3 },
-    .{ .offset = 33, .nbits = 3 },    .{ .offset = 41, .nbits = 3 },    .{ .offset = 49, .nbits = 4 },
-    .{ .offset = 65, .nbits = 4 },    .{ .offset = 81, .nbits = 4 },    .{ .offset = 97, .nbits = 4 },
-    .{ .offset = 113, .nbits = 5 },   .{ .offset = 145, .nbits = 5 },   .{ .offset = 177, .nbits = 5 },
-    .{ .offset = 209, .nbits = 5 },   .{ .offset = 241, .nbits = 6 },   .{ .offset = 305, .nbits = 6 },
-    .{ .offset = 369, .nbits = 7 },   .{ .offset = 497, .nbits = 8 },   .{ .offset = 753, .nbits = 9 },
-    .{ .offset = 1265, .nbits = 10 }, .{ .offset = 2289, .nbits = 11 }, .{ .offset = 4337, .nbits = 12 },
+    .{ .offset = 1, .nbits = 2 },     .{ .offset = 5, .nbits = 2 },      .{ .offset = 9, .nbits = 2 },
+    .{ .offset = 13, .nbits = 2 },    .{ .offset = 17, .nbits = 3 },     .{ .offset = 25, .nbits = 3 },
+    .{ .offset = 33, .nbits = 3 },    .{ .offset = 41, .nbits = 3 },     .{ .offset = 49, .nbits = 4 },
+    .{ .offset = 65, .nbits = 4 },    .{ .offset = 81, .nbits = 4 },     .{ .offset = 97, .nbits = 4 },
+    .{ .offset = 113, .nbits = 5 },   .{ .offset = 145, .nbits = 5 },    .{ .offset = 177, .nbits = 5 },
+    .{ .offset = 209, .nbits = 5 },   .{ .offset = 241, .nbits = 6 },    .{ .offset = 305, .nbits = 6 },
+    .{ .offset = 369, .nbits = 7 },   .{ .offset = 497, .nbits = 8 },    .{ .offset = 753, .nbits = 9 },
+    .{ .offset = 1265, .nbits = 10 }, .{ .offset = 2289, .nbits = 11 },  .{ .offset = 4337, .nbits = 12 },
     .{ .offset = 8433, .nbits = 13 }, .{ .offset = 16625, .nbits = 24 },
 };
 
@@ -733,12 +733,12 @@ const brotli_dictionary = @embedFile("brotli_dictionary.bin");
 
 const kSizeBitsByLength = [32]u8{
     0, 0, 0, 0, 10, 10, 11, 11, 10, 10, 10, 10, 10, 9, 9, 8,
-    7, 7, 8,  7, 7,  6,  5,  5,  5,  0,  0,  0,  0, 0, 0, 0,
+    7, 7, 8, 7, 7,  6,  5,  5,  5,  0,  0,  0,  0,  0, 0, 0,
 };
 
 const kOffsetsByLength = [32]u32{
-    0,     0,     0,     0,     0,     4096,  9216,  21504,
-    35840, 44032, 53248, 63488, 74752, 87040, 93696, 100864,
+    0,      0,      0,      0,      0,      4096,   9216,   21504,
+    35840,  44032,  53248,  63488,  74752,  87040,  93696,  100864,
     104704, 106752, 108928, 113536, 115968, 118528, 119872, 121280,
     122016, 122784, 122784, 122784, 122784, 122784, 122784, 122784,
 };
@@ -997,7 +997,7 @@ fn readHuffmanCode(allocator: std.mem.Allocator, reader: *BitReader, alphabet_si
         // Simple prefix code
         const nsym_minus1 = try reader.readBits(2);
         const nsym: u8 = @intCast(nsym_minus1 + 1);
-        var symbols: [4]u16 = .{0} ** 4;
+        var symbols: [4]u16 = @splat(0);
 
         // Number of bits per symbol: Log2Floor(alphabet_size - 1), matching C reference
         // C's Log2Floor counts right-shifts until 0, i.e. ceil(log2(x+1)) = number of bits needed
@@ -1101,7 +1101,7 @@ fn readComplexHuffmanCode(allocator: std.mem.Allocator, reader: *BitReader, alph
 // Actual complex Huffman code reading (replaces the above)
 fn readComplexHuffmanCodeWithSkip(allocator: std.mem.Allocator, reader: *BitReader, alphabet_size: u16, hskip: u32) Error!HuffmanTable {
     // Read code-length code lengths
-    var cl_code_lengths: [18]u8 = .{0} ** 18;
+    var cl_code_lengths: [18]u8 = @splat(0);
     var space: i32 = 32;
     var num_codes: usize = 0;
 
@@ -1358,7 +1358,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
             dist_block_count = @intCast(meta_block_len);
         }
 
-
         // Read NPOSTFIX and NDIRECT
         const npostfix = try reader.readBits(2);
         const ndirect_raw = try reader.readBits(4);
@@ -1370,7 +1369,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
         for (0..lit_block_types) |ci| {
             context_modes[ci] = @intCast(try reader.readBits(2));
         }
-
 
         // Context maps
         const lit_context_map_size = lit_block_types * 64;
@@ -1412,7 +1410,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
             cmd_htrees_init = hi + 1;
         }
 
-
         // Distance trees
         const num_dist_codes: u16 = @intCast(16 + ndirect + (@as(u32, 48) << @as(u5, @intCast(npostfix))));
         const dist_htrees = allocator.alloc(HuffmanTable, num_dist_htrees) catch return error.OutOfMemory;
@@ -1427,7 +1424,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
             dist_htrees[hi] = try readHuffmanCode(allocator, &reader, num_dist_codes);
             dist_htrees_init = hi + 1;
         }
-
 
         // Command loop
         var meta_bytes_remaining: usize = meta_block_len;
@@ -1554,7 +1550,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
                 dist_rb_idx -%= 1;
                 distance = dist_rb[dist_rb_idx & 3];
             }
-
 
             // Copy from ring buffer or dictionary
             if (distance <= ring_pos) {
@@ -1777,7 +1772,7 @@ fn emitCompressedMetaBlockInner(writer: *BitWriter, block: []const u8, is_last: 
     try writer.writeBits(0, 1); // Distance context map: VarLenUint8=0 → 1 tree
 
     // --- Build literal Huffman code ---
-    var histogram = [_]u32{0} ** 256;
+    var histogram = @as([256]u32, @splat(0));
     for (block) |byte| histogram[byte] += 1;
 
     // Count distinct symbols
@@ -1905,18 +1900,18 @@ fn buildAndEmitComplexCode(
     codes_out: *[256]u16,
 ) Error!void {
     // Build code lengths from histogram
-    var code_lengths: [256]u8 = .{0} ** 256;
+    var code_lengths: [256]u8 = @splat(0);
     buildCodeLengthsFromHistogram(histogram, &code_lengths, num_symbols);
 
     // Build canonical codes
-    var bl_count = [_]u32{0} ** 16;
+    var bl_count = @as([16]u32, @splat(0));
     for (0..num_symbols) |i| {
         if (code_lengths[i] > 0 and code_lengths[i] <= 15) {
             bl_count[code_lengths[i]] += 1;
         }
     }
 
-    var next_code = [_]u32{0} ** 16;
+    var next_code = @as([16]u32, @splat(0));
     {
         var code: u32 = 0;
         for (1..16) |bits| {
@@ -1939,13 +1934,13 @@ fn buildAndEmitComplexCode(
     try writer.writeBits(0, 2); // HSKIP=0
 
     // Build code-length histogram
-    var cl_histogram = [_]u32{0} ** 18;
+    var cl_histogram = @as([18]u32, @splat(0));
     for (0..num_symbols) |i| {
         cl_histogram[code_lengths[i]] += 1;
     }
 
     // Build code-length code lengths (max 5 bits)
-    var cl_depths: [18]u8 = .{0} ** 18;
+    var cl_depths: [18]u8 = @splat(0);
     buildClCodeLengthsSimple(&cl_histogram, &cl_depths);
 
     // Emit code-length code lengths in specified order
@@ -1959,13 +1954,13 @@ fn buildAndEmitComplexCode(
     }
 
     // Build canonical codes for code-length symbols
-    var cl_bl_count = [_]u32{0} ** 6;
+    var cl_bl_count = @as([6]u32, @splat(0));
     for (0..18) |i| {
         if (cl_depths[i] > 0 and cl_depths[i] <= 5) {
             cl_bl_count[cl_depths[i]] += 1;
         }
     }
-    var cl_next_code = [_]u32{0} ** 6;
+    var cl_next_code = @as([6]u32, @splat(0));
     {
         var code: u32 = 0;
         for (1..6) |bits| {
@@ -1973,7 +1968,7 @@ fn buildAndEmitComplexCode(
             cl_next_code[bits] = code;
         }
     }
-    var cl_codes: [18]u32 = .{0} ** 18;
+    var cl_codes: [18]u32 = @splat(0);
     for (0..18) |i| {
         if (cl_depths[i] > 0) {
             cl_codes[i] = @intCast(reverseBits(cl_next_code[cl_depths[i]], cl_depths[i]));
@@ -2125,16 +2120,15 @@ fn emitClCodeLength(writer: *BitWriter, depth: u8) Error!void {
     //   kCodeLengthPrefixLength = {2,2,2,3,2,2,2,4,2,2,2,3,2,2,2,4}
     //   kCodeLengthPrefixValue  = {0,4,3,2,0,4,3,1,0,4,3,2,0,4,3,5}
     switch (depth) {
-        0 => try writer.writeBits(0, 2),   // 00
-        1 => try writer.writeBits(7, 4),   // 0111
-        2 => try writer.writeBits(3, 3),   // 011
-        3 => try writer.writeBits(2, 2),   // 10
-        4 => try writer.writeBits(1, 2),   // 01
-        5 => try writer.writeBits(15, 4),  // 1111
+        0 => try writer.writeBits(0, 2), // 00
+        1 => try writer.writeBits(7, 4), // 0111
+        2 => try writer.writeBits(3, 3), // 011
+        3 => try writer.writeBits(2, 2), // 10
+        4 => try writer.writeBits(1, 2), // 01
+        5 => try writer.writeBits(15, 4), // 1111
         else => try writer.writeBits(0, 2), // treat as 0
     }
 }
-
 
 fn compressMetaBlock(
     allocator: std.mem.Allocator,
@@ -2272,7 +2266,7 @@ fn writeTrivialCompressedBlock(writer: *BitWriter, block: []const u8, allocator:
 
     // Now write the Huffman codes
     // 1. Literal Huffman code: build from histogram
-    var histogram: [256]u32 = .{0} ** 256;
+    var histogram: [256]u32 = @splat(0);
     for (block) |byte| {
         histogram[byte] += 1;
     }
@@ -2467,14 +2461,14 @@ fn writeSimpleLiteralCode(writer: *BitWriter, histogram: *const [256]u32, num_sy
 
 fn writeComplexLiteralCode(writer: *BitWriter, histogram: *const [256]u32, allocator: std.mem.Allocator) !void {
     // Build optimal code lengths using package-merge or simple method
-    var code_lengths: [256]u8 = .{0} ** 256;
+    var code_lengths: [256]u8 = @splat(0);
     buildCodeLengths(histogram, &code_lengths);
 
     // Encode using complex prefix code
     try writer.writeBits(0, 2); // HSKIP=0
 
     // First encode the code-length code lengths
-    var cl_histogram: [18]u32 = .{0} ** 18;
+    var cl_histogram: [18]u32 = @splat(0);
     // Count what code length symbols we'll need
     for (0..256) |i| {
         if (code_lengths[i] > 0 and code_lengths[i] <= 15) {
@@ -2483,7 +2477,7 @@ fn writeComplexLiteralCode(writer: *BitWriter, histogram: *const [256]u32, alloc
     }
     // Also count zeros (we'll need repeat-zero for runs)
     // For simplicity, just emit each code length directly (no RLE)
-    var cl_code_lengths: [18]u8 = .{0} ** 18;
+    var cl_code_lengths: [18]u8 = @splat(0);
     buildClCodeLengths(&cl_histogram, &cl_code_lengths);
 
     // Write code-length code lengths in the specified order
@@ -2492,7 +2486,7 @@ fn writeComplexLiteralCode(writer: *BitWriter, histogram: *const [256]u32, alloc
     }
 
     // Build codes for code-length symbols
-    var cl_codes: [18]u32 = .{0} ** 18;
+    var cl_codes: [18]u32 = @splat(0);
     buildCanonicalCodes(&cl_code_lengths, &cl_codes, 18);
 
     // Write symbol code lengths
@@ -2641,7 +2635,7 @@ fn buildClCodeLengths(histogram: *const [18]u32, code_lengths: *[18]u8) void {
 }
 
 fn buildCanonicalCodes(code_lengths: anytype, codes: anytype, count: usize) void {
-    var bl_count: [16]u16 = .{0} ** 16;
+    var bl_count: [16]u16 = @splat(0);
     for (0..count) |i| {
         if (code_lengths[i] <= 15) {
             bl_count[code_lengths[i]] += 1;
@@ -2649,7 +2643,7 @@ fn buildCanonicalCodes(code_lengths: anytype, codes: anytype, count: usize) void
     }
     bl_count[0] = 0;
 
-    var next_code: [16]u32 = .{0} ** 16;
+    var next_code: [16]u32 = @splat(0);
     var code: u32 = 0;
     for (1..16) |bits| {
         code = (code + bl_count[bits - 1]) << 1;
@@ -2805,14 +2799,13 @@ test "brotli zig compress empty data" {
 
 test "brotli zig round-trip repeated data" {
     const allocator = std.testing.allocator;
-    const original = "ABCDEFGH" ** 200;
+    const original = comptime repeated.bytes("ABCDEFGH", 200);
     const compressed_data = try compress(allocator, original);
     defer allocator.free(compressed_data);
     const decompressed = try decompress(allocator, compressed_data, original.len);
     defer allocator.free(decompressed);
     try std.testing.expectEqualStrings(original, decompressed);
 }
-
 
 test "buildHuffmanTable: lookup correctness" {
     const allocator = std.testing.allocator;
@@ -2841,7 +2834,7 @@ test "buildHuffmanTable: lookup correctness" {
 
     // Test 2: codes > 8 bits (secondary tables)
     {
-        var cl: [300]u8 = .{0} ** 300;
+        var cl: [300]u8 = @splat(0);
         cl[0] = 1;
         for (1..10) |i| cl[i] = 9;
         var table = try buildHuffmanTable(allocator, &cl, 300);
@@ -2865,9 +2858,17 @@ test "buildHuffmanTable: lookup correctness" {
 
     // Test 3: mixed short (2,4-bit) and long (9-bit)
     {
-        var cl: [704]u8 = .{0} ** 704;
-        cl[0] = 2; cl[1] = 2; cl[2] = 4; cl[3] = 4; cl[4] = 4; cl[5] = 4;
-        cl[6] = 9; cl[7] = 9; cl[8] = 9; cl[9] = 9;
+        var cl: [704]u8 = @splat(0);
+        cl[0] = 2;
+        cl[1] = 2;
+        cl[2] = 4;
+        cl[3] = 4;
+        cl[4] = 4;
+        cl[5] = 4;
+        cl[6] = 9;
+        cl[7] = 9;
+        cl[8] = 9;
+        cl[9] = 9;
         var table = try buildHuffmanTable(allocator, &cl, 704);
         defer table.deinit();
         // sym 0: 2-bit

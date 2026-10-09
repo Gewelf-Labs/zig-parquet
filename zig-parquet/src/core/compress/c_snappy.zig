@@ -1,12 +1,17 @@
 //! Snappy compression/decompression for Parquet
 //!
-//! Uses the Snappy C library via @cImport.
+//! Uses the Snappy C library.
 //! Note: Snappy is a C++ library with a C API (snappy-c.h).
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("snappy-c.h");
-});
+const c = struct {
+    const SNAPPY_OK: c_int = 0;
+
+    extern fn snappy_max_compressed_length(source_length: usize) usize;
+    extern fn snappy_compress(input: [*]const u8, input_length: usize, compressed: [*]u8, compressed_length: *usize) c_int;
+    extern fn snappy_uncompress(compressed: [*]const u8, compressed_length: usize, uncompressed: [*]u8, uncompressed_length: *usize) c_int;
+    extern fn snappy_uncompressed_length(compressed: [*]const u8, compressed_length: usize, result: *usize) c_int;
+};
 
 pub const Error = error{
     CompressionError,

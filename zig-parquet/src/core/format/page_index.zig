@@ -99,6 +99,7 @@ pub const OffsetIndex = struct {
             switch (field.field_id) {
                 1 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     const locs = try allocator.alloc(PageLocation, list_header.size);
                     errdefer allocator.free(locs);
                     for (0..list_header.size) |i| {
@@ -108,6 +109,7 @@ pub const OffsetIndex = struct {
                 },
                 2 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     const vals = try allocator.alloc(i64, list_header.size);
                     errdefer allocator.free(vals);
                     for (0..list_header.size) |i| {
@@ -211,7 +213,7 @@ pub const ColumnIndex = struct {
         for (self.max_values) |v| try writer.writeBinary(v);
 
         try writer.writeFieldHeader(4, .i32);
-        try writer.writeI32(@intFromEnum(self.boundary_order));
+        try writer.writeI32(@backingInt(self.boundary_order));
 
         if (self.null_counts) |counts| {
             try writer.writeFieldHeader(5, .list);
@@ -236,6 +238,7 @@ pub const ColumnIndex = struct {
 
 fn readBoolList(allocator: std.mem.Allocator, reader: *thrift.CompactReader) ![]bool {
     const header = try reader.readListHeader();
+    try reader.checkListFits(header.size);
     const out = try allocator.alloc(bool, header.size);
     errdefer allocator.free(out);
     for (0..header.size) |i| {
@@ -259,6 +262,7 @@ fn writeBoolList(writer: *thrift.CompactWriter, values: []const bool) !void {
 
 fn readBinaryList(allocator: std.mem.Allocator, reader: *thrift.CompactReader) ![][]const u8 {
     const header = try reader.readListHeader();
+    try reader.checkListFits(header.size);
     const out = try allocator.alloc([]const u8, header.size);
     var count: usize = 0;
     errdefer {
@@ -275,6 +279,7 @@ fn readBinaryList(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !
 
 fn readI64List(allocator: std.mem.Allocator, reader: *thrift.CompactReader) ![]i64 {
     const header = try reader.readListHeader();
+    try reader.checkListFits(header.size);
     const out = try allocator.alloc(i64, header.size);
     errdefer allocator.free(out);
     for (0..header.size) |i| {
@@ -366,9 +371,9 @@ test "ColumnIndex round-trip with nulls" {
 }
 
 test "ColumnIndex boundary_order enum values" {
-    try testing.expectEqual(@as(i32, 0), @intFromEnum(BoundaryOrder.unordered));
-    try testing.expectEqual(@as(i32, 1), @intFromEnum(BoundaryOrder.ascending));
-    try testing.expectEqual(@as(i32, 2), @intFromEnum(BoundaryOrder.descending));
+    try testing.expectEqual(@as(i32, 0), @backingInt(BoundaryOrder.unordered));
+    try testing.expectEqual(@as(i32, 1), @backingInt(BoundaryOrder.ascending));
+    try testing.expectEqual(@as(i32, 2), @backingInt(BoundaryOrder.descending));
 }
 
 test "ColumnIndex accepts alternate bool encoding (0x00)" {

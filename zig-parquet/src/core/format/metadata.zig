@@ -30,6 +30,7 @@ pub const FileMetaData = struct {
                 1 => meta.version = try reader.readI32(),
                 2 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var schema_list = try allocator.alloc(SchemaElement, list_header.size);
                     for (0..list_header.size) |i| {
                         schema_list[i] = try SchemaElement.parse(allocator, reader);
@@ -39,6 +40,7 @@ pub const FileMetaData = struct {
                 3 => meta.num_rows = try reader.readI64(),
                 4 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var row_groups_list = try allocator.alloc(RowGroup, list_header.size);
                     for (0..list_header.size) |i| {
                         row_groups_list[i] = try RowGroup.parse(allocator, reader);
@@ -47,6 +49,7 @@ pub const FileMetaData = struct {
                 },
                 5 => {
                     const list_header = try reader.readListHeader();
+                    try reader.checkListFits(list_header.size);
                     var kvs = try allocator.alloc(KeyValue, list_header.size);
                     for (0..list_header.size) |i| {
                         kvs[i] = try KeyValue.parse(allocator, reader);

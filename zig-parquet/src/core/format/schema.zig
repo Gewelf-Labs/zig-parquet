@@ -62,7 +62,7 @@ pub const SchemaElement = struct {
 
         if (self.type_) |t| {
             try writer.writeFieldHeader(1, .i32);
-            try writer.writeI32(@intFromEnum(t));
+            try writer.writeI32(@backingInt(t));
         }
 
         if (self.type_length) |len| {
@@ -72,7 +72,7 @@ pub const SchemaElement = struct {
 
         if (self.repetition_type) |rt| {
             try writer.writeFieldHeader(3, .i32);
-            try writer.writeI32(@intFromEnum(rt));
+            try writer.writeI32(@backingInt(rt));
         }
 
         try writer.writeFieldHeader(4, .binary);
