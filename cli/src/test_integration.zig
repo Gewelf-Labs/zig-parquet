@@ -7,6 +7,7 @@ const io = std.testing.io;
 
 const test_file_basic = "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet";
 const test_file_multi_rg = "../test-files-arrow/structure/multiple_row_groups.parquet";
+const test_file_nested = "../test-files-wild/trace.snappy.parquet";
 
 fn runPq(allocator: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -92,6 +93,30 @@ test "pq schema shows fixed length info" {
     // Should show fixed_len_byte_array with length
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "FIXED_LEN_BYTE_ARRAY"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[len=16]"));
+}
+
+test "pq schema shows nested list and map groups as a tree" {
+    const allocator = testing.allocator;
+
+    const result = try runPq(allocator, &.{ "schema", test_file_nested });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try testing.expect(result.term == .exited);
+    try testing.expectEqual(@as(u8, 0), result.term.exited);
+
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1,
+        \\├── baggage: LIST (REQUIRED)
+        \\│   └── list: GROUP (REPEATED)
+        \\│       └── element: GROUP (REQUIRED)
+        \\│           ├── name: BYTE_ARRAY (REQUIRED)
+        \\│           └── value: BYTE_ARRAY (REQUIRED)
+        \\
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "├── exchange_request_headers: MAP (REQUIRED)"));
+    // Only the final top-level field gets the closing connector at depth 0
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.stdout, "\n└── "));
+    try testing.expect(std.mem.endsWith(u8, result.stdout, "└── exchange_error_message: BYTE_ARRAY (REQUIRED)\n"));
 }
 
 test "pq schema errors on missing file" {
