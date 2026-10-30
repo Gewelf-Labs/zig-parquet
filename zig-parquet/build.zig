@@ -195,6 +195,20 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
 
+    // Benchmark harness: zig build bench [-- <rows>]
+    {
+        const bench_mod = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        bench_mod.addImport("parquet", parquet_mod);
+        const bench_exe = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
+        const bench_run = b.addRunArtifact(bench_exe);
+        if (b.args) |args| bench_run.addArgs(args);
+        b.step("bench", "Build and run the benchmark harness").dependOn(&bench_run.step);
+    }
+
     // WASM smoke test: compile both WASM targets (no codecs) to verify exports link
     const wasm_smoke_step = b.step("wasm-smoke", "Verify WASM targets compile and link");
     {
@@ -327,11 +341,11 @@ fn resolveDeps(b: *std.Build, codecs: Codecs) Deps {
     // C codec tarballs are lazy so Zig-only builds do not fetch them. `dependency`
     // exits configuration for a retry once a missing tarball is actually required.
     return .{
-        .lz4 = if (codecs.lz4) b.dependency("lz4", .{}) else null,
-        .brotli = if (codecs.brotli) b.dependency("brotli", .{}) else null,
-        .snappy = if (codecs.snappy) b.dependency("snappy", .{}) else null,
-        .zstd = if (codecs.zstd) b.dependency("zstd", .{}) else null,
-        .zlib = if (codecs.gzip) b.dependency("zlib", .{}) else null,
+        .lz4 = if (codecs.lz4) b.lazyDependency("lz4", .{}) else null,
+        .brotli = if (codecs.brotli) b.lazyDependency("brotli", .{}) else null,
+        .snappy = if (codecs.snappy) b.lazyDependency("snappy", .{}) else null,
+        .zstd = if (codecs.zstd) b.lazyDependency("zstd", .{}) else null,
+        .zlib = if (codecs.gzip) b.lazyDependency("zlib", .{}) else null,
         .codecs = codecs,
     };
 }
