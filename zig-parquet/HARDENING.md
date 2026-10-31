@@ -217,6 +217,7 @@ Each fast path keeps its bounds check at the granularity noted and falls back to
 3. **Use helpers** — `safePageSize`, `extractBitWidth`, etc.
 4. **Specific errors** — `InvalidBitWidth` over generic `InvalidData`
 5. **Comment `catch unreachable`** — explain the mathematical invariant
+6. **Evaluate a fallible payload before writing a union slot** — `slot = .{ .value = try f() }` writes the tag before the payload, so a cleanup that frees `.value` slots would free undefined bytes after the `try` fails. Write `const v = try f(); slot = .{ .value = v };`
 
 ### Writer
 1. **Validate at API boundary** — check sizes, counts, value ranges
