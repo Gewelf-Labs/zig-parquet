@@ -1,2 +1,3 @@
 [tools]
+# fmt toolchain; 0.17 is also supported (see AGENTS.md)
 zig = "0.16.0"

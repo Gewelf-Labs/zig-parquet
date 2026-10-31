@@ -5,7 +5,7 @@ Contributions are welcome! This document covers how to get started.
 ## Development Setup
 
 **Requirements:**
-- Zig 0.17.0
+- Zig 0.16.0 or 0.17.0 (one source tree; see the Dual-version rules in AGENTS.md. `zig fmt` only with 0.16)
 - C compiler (for compression libraries)
 - C++ compiler (for Snappy)
 

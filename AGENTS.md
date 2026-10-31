@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-zig-parquet is a native Parquet library written in Zig 0.17.0. It provides read/write support for Parquet files, a C ABI, and a CLI tool (`pqi`). Read `README.md` for the full feature list and API examples.
+zig-parquet is a native Parquet library written in Zig 0.16.0 and 0.17.0 (one source tree). It provides read/write support for Parquet files, a C ABI, and a CLI tool (`pqi`). Read `README.md` for the full feature list and API examples.
 
 ## Project Structure
 
@@ -56,13 +56,41 @@ make example NAME=wasm_demo OPT=ReleaseSmall
 make wasm                              # Verify WASM targets compile and link
 make validate-wild                     # Validate pqi against wild files (failures)
 make validate-wild-all                 # Validate pqi against wild files (all)
-make fmt                               # zig fmt across sources
+make bench ZIG=<path>                  # Benchmark harness (ReleaseFast, zig-only codecs); `zig build bench -- <rows>` sets row count
+make fmt ZIG=<0.16 zig>                # zig fmt across sources (0.16 only)
 make clean                             # Remove .zig-cache and zig-out everywhere
 ```
 
 `CODECS` values: `all` (default), `none`, `zig-only`, `c-only`, or comma-separated list from `zstd,snappy,gzip,lz4,brotli` (Zig) and `c-zstd,c-snappy,c-gzip,c-lz4,c-brotli` (C/C++).
 
-## Zig 0.17.0 — Key API Patterns
+## Dual-version rules
+
+Every line under `zig-parquet/` and `cli/` must compile on both Zig 0.16.0 and 0.17.0.
+
+| never write | write instead |
+|---|---|
+| `[_]T{v} ** n`, `.{v} ** n` | `@as([n]T, @splat(v))`, or `var a: [n]T = @splat(v);` |
+| `"abc" ** n` | `comptime repeat.bytes("abc", n)` (`src/repeat.zig`) |
+| `@cImport` / `@cInclude` | hand-written `const c = struct { extern fn ...; }` |
+| `allocator.dupeZ(u8, x)` | `allocator.dupeSentinel(u8, x, 0)` |
+| `std.hash.crc.Crc32`, `crc.@"CRC-32/ISO-HDLC"` | `std.hash.Crc32` |
+| `b.args` / `run.addPassthruArgs()` in build.zig | `passArgs(b, run)` helper (task 1.2) |
+| `@backingInt`, `@fromBackingInt` | `@intFromEnum`, `@enumFromInt` |
+| `allocator.print(...)`, `allocator.printSentinel(...)` | `std.fmt.allocPrint(...)`, `std.fmt.allocPrintSentinel(...)` |
+| `std.heap.SafeAllocator`, `std.heap.GeneralPurposeAllocator` | `std.heap.DebugAllocator(.{})` |
+| `std.meta.fields`, `std.meta.Int`, `std.meta.Tag` (new uses) | explicit types / `switch (T)` |
+
+- **`zig fmt` only with 0.16** (`make fmt ZIG=<Z16>`). 0.17's fmt rewrites builtins to 0.17-only
+  spellings. Do not let an editor format with 0.17.
+- Do not follow the `zig-0-17` skill or main's 0.17-only code for spellings. Use the table above.
+- Version gates (`builtin.zig_version`) are **not** allowed in `src/`. If you hit a 0.16/0.17
+  difference not in the table, **stop and ask**.
+
+Pick the toolchain per invocation with `ZIG=<path>` (default: `zig` on PATH), for example
+`make test ZIG=C:/tools/zig-0.16.0/zig.exe` or `make test ZIG=C:/tools/zig-0.17.0/zig.exe`.
+Non-0.16 toolchains use the gitignored `.zig17/cache` directory so their build caches stay separate.
+
+## Zig 0.16.0 and 0.17.0 — Key API Patterns
 
 Always search the codebase for existing patterns before writing new code.
 
@@ -126,9 +154,9 @@ try stdout_writer.interface.flush();
 // std.meta.intToEnum was removed — use std.enums.fromInt (returns ?T)
 const codec = std.enums.fromInt(CompressionCodec, v) orelse return error.InvalidCodec;
 
-// @intFromEnum / @enumFromInt were removed in 0.17
-const raw: u8 = @backingInt(status);
-const restored: Status = @fromBackingInt(raw);
+// Use @intFromEnum / @enumFromInt (works on 0.16 and 0.17); never @backingInt / @fromBackingInt
+const raw: u8 = @intFromEnum(status);
+const restored: Status = @enumFromInt(raw);
 ```
 
 ### Target and formatting
@@ -137,7 +165,7 @@ const restored: Status = @fromBackingInt(raw);
 const arch = @import("builtin").target.cpu.arch;
 
 // std.fmt.allocPrint moved onto the allocator
-const name = try allocator.print("name_{d}", .{i});
+const name = try std.fmt.allocPrint(allocator, "name_{d}", .{i});
 ```
 
 ### Custom Format Functions
