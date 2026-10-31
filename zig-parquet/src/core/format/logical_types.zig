@@ -106,80 +106,90 @@ pub const LogicalType = union(enum) {
 
     const Self = @This();
 
+    /// Free allocated data (geo CRS strings). Other variants own nothing.
+    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .geometry => |g| if (g.crs) |crs| allocator.free(crs),
+            .geography => |g| if (g.crs) |crs| allocator.free(crs),
+            else => {},
+        }
+    }
+
     /// Parse LogicalType from Thrift Compact Protocol
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !?Self {
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
         var result: ?Self = null;
+        errdefer if (result) |*r| r.deinit(allocator);
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
                 1 => {
                     // STRING - empty struct
                     try reader.skip(.struct_);
-                    result = .string;
+                    setResult(allocator, &result, .string);
                 },
                 4 => {
                     // ENUM - empty struct
                     try reader.skip(.struct_);
-                    result = .enum_;
+                    setResult(allocator, &result, .enum_);
                 },
                 5 => {
                     // DECIMAL - DecimalType struct
                     const decimal_type = try parseDecimalType(reader);
-                    result = .{ .decimal = decimal_type };
+                    setResult(allocator, &result, .{ .decimal = decimal_type });
                 },
                 6 => {
                     // DATE - empty struct
                     try reader.skip(.struct_);
-                    result = .date;
+                    setResult(allocator, &result, .date);
                 },
                 7 => {
                     // TIME - TimeType struct
                     const time_type = try parseTimeType(reader);
-                    result = .{ .time = time_type };
+                    setResult(allocator, &result, .{ .time = time_type });
                 },
                 8 => {
                     // TIMESTAMP - TimestampType struct
                     const ts_type = try parseTimestampType(reader);
-                    result = .{ .timestamp = ts_type };
+                    setResult(allocator, &result, .{ .timestamp = ts_type });
                 },
                 // Field 9 is reserved for Interval
                 10 => {
                     // INT - IntType struct
                     const int_type = try parseIntType(reader);
-                    result = .{ .int = int_type };
+                    setResult(allocator, &result, .{ .int = int_type });
                 },
                 12 => {
                     // JSON - empty struct
                     try reader.skip(.struct_);
-                    result = .json;
+                    setResult(allocator, &result, .json);
                 },
                 13 => {
                     // BSON - empty struct
                     try reader.skip(.struct_);
-                    result = .bson;
+                    setResult(allocator, &result, .bson);
                 },
                 14 => {
                     // UUID - empty struct
                     try reader.skip(.struct_);
-                    result = .uuid;
+                    setResult(allocator, &result, .uuid);
                 },
                 15 => {
                     // FLOAT16 - empty struct
                     try reader.skip(.struct_);
-                    result = .float16;
+                    setResult(allocator, &result, .float16);
                 },
                 17 => {
                     // GEOMETRY - GeometryType struct
                     const geo_type = try parseGeometryType(allocator, reader);
-                    result = .{ .geometry = geo_type };
+                    setResult(allocator, &result, .{ .geometry = geo_type });
                 },
                 18 => {
                     // GEOGRAPHY - GeographyType struct
                     const geo_type = try parseGeographyType(allocator, reader);
-                    result = .{ .geography = geo_type };
+                    setResult(allocator, &result, .{ .geography = geo_type });
                 },
                 else => try reader.skip(field.field_type),
             }
@@ -352,6 +362,12 @@ pub const LogicalType = union(enum) {
     }
 };
 
+/// Overwrite a parsed LogicalType, freeing the previous value (repeated union field).
+fn setResult(allocator: std.mem.Allocator, result: *?LogicalType, value: LogicalType) void {
+    if (result.*) |old| old.deinit(allocator);
+    result.* = value;
+}
+
 // Helper functions for parsing nested types
 
 fn parseTimeUnit(reader: *thrift.CompactReader) !TimeUnit {
@@ -471,10 +487,15 @@ fn parseGeometryType(allocator: std.mem.Allocator, reader: *thrift.CompactReader
     reader.resetFieldTracking();
 
     var g = GeometryType{};
+    errdefer if (g.crs) |c| allocator.free(c);
 
     while (try reader.readFieldHeader()) |field| {
         switch (field.field_id) {
-            1 => g.crs = try allocator.dupe(u8, try reader.readString()),
+            1 => {
+                const crs = try allocator.dupe(u8, try reader.readString());
+                if (g.crs) |old| allocator.free(old); // repeated field 1: drop the earlier value
+                g.crs = crs;
+            },
             else => try reader.skip(field.field_type),
         }
     }
@@ -488,10 +509,15 @@ fn parseGeographyType(allocator: std.mem.Allocator, reader: *thrift.CompactReade
     reader.resetFieldTracking();
 
     var g = GeographyType{};
+    errdefer if (g.crs) |c| allocator.free(c);
 
     while (try reader.readFieldHeader()) |field| {
         switch (field.field_id) {
-            1 => g.crs = try allocator.dupe(u8, try reader.readString()),
+            1 => {
+                const crs = try allocator.dupe(u8, try reader.readString());
+                if (g.crs) |old| allocator.free(old); // repeated field 1: drop the earlier value
+                g.crs = crs;
+            },
             2 => g.algorithm = try EdgeInterpolationAlgorithm.fromInt(try reader.readI32()),
             else => try reader.skip(field.field_type),
         }

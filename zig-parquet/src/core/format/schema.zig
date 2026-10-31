@@ -27,16 +27,8 @@ pub const SchemaElement = struct {
     /// Free the name and any allocated logical type data. Safe on a partially filled value.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
-        if (self.logical_type) |lt| freeLogicalType(allocator, lt);
+        if (self.logical_type) |lt| lt.deinit(allocator);
         self.* = .{};
-    }
-
-    fn freeLogicalType(allocator: std.mem.Allocator, lt: LogicalType) void {
-        switch (lt) {
-            .geometry => |g| if (g.crs) |crs| allocator.free(crs),
-            .geography => |g| if (g.crs) |crs| allocator.free(crs),
-            else => {},
-        }
     }
 
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
@@ -68,7 +60,7 @@ pub const SchemaElement = struct {
                 9 => elem.field_id = try reader.readI32(), // field_id
                 10 => { // logical_type
                     const lt = try LogicalType.parse(allocator, reader);
-                    if (elem.logical_type) |old| freeLogicalType(allocator, old);
+                    if (elem.logical_type) |old| old.deinit(allocator);
                     elem.logical_type = lt;
                 },
                 else => try reader.skip(field.field_type),

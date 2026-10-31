@@ -57,3 +57,47 @@ test "FileMetaData.parse frees an earlier schema list when field 2 repeats" {
     try std.testing.expectEqual(@as(usize, 1), meta.schema.len);
     try std.testing.expectEqualStrings("", meta.schema[0].name);
 }
+
+test "LogicalType.parse frees geo crs on OOM" {
+    const allocator = std.testing.allocator;
+    const data = [_]u8{
+        0x0C, 0x22, // field 17 GEOMETRY (long form, zigzag id 17): struct
+        0x18, 0x09, 'E', 'P', 'S', 'G', ':', '4', '3', '2', '6', // field 1 crs: binary "EPSG:4326"
+        0x00, // end GeometryType
+        0x00, // end LogicalType
+    };
+
+    // Fail each allocation in turn; std.testing.allocator catches any leak on the failing runs.
+    var succeeded = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var reader = thrift.CompactReader.init(&data);
+        const parsed = format.LogicalType.parse(failing.allocator(), &reader) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        var lt = parsed orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("EPSG:4326", lt.geometry.crs.?);
+        lt.deinit(failing.allocator());
+        succeeded = true;
+        break;
+    }
+    try std.testing.expect(succeeded);
+    try std.testing.expect(fail_index > 0);
+}
+
+test "LogicalType.parse frees the earlier geo crs when field 1 repeats" {
+    const allocator = std.testing.allocator;
+    const data = [_]u8{
+        0x0C, 0x22, // field 17 GEOMETRY: struct
+        0x18, 0x09, 'E', 'P', 'S', 'G', ':', '4', '3', '2', '6', // field 1 crs "EPSG:4326"
+        0x08, 0x02, 0x09, 'E', 'P', 'S', 'G', ':', '3', '8', '5', '7', // field 1 again (long form): "EPSG:3857"
+        0x00, // end GeometryType
+        0x00, // end LogicalType
+    };
+    var reader = thrift.CompactReader.init(&data);
+    var lt = (try format.LogicalType.parse(allocator, &reader)) orelse return error.TestUnexpectedResult;
+    defer lt.deinit(allocator);
+    try std.testing.expectEqualStrings("EPSG:3857", lt.geometry.crs.?);
+}
