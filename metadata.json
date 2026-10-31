@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M67TRFCV1RAN77HG2TRA0R42",
+  "strategy": "manual-commit",
+  "branch": "agent/zig-parquet-perf-compat-dc9ccc",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "zig-parquet/src/core/dynamic_reader.zig",
+    "zig-parquet/src/tests/roundtrip_test.zig"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4,
+    "cache_creation_tokens": 2402,
+    "cache_read_tokens": 297723,
+    "output_tokens": 2024,
+    "api_call_count": 1,
+    "subagent_tokens": {
+      "input_tokens": 14,
+      "cache_creation_tokens": 12111,
+      "cache_read_tokens": 1466711,
+      "output_tokens": 9820,
+      "api_call_count": 7
+    }
+  },
+  "redaction": {
+    "replacements": 39,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 39,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
