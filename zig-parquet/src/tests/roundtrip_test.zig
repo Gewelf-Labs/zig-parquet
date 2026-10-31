@@ -4802,3 +4802,40 @@ test "zero-copy strings: V2 uncompressed page in a compressed chunk" {
     while (try sit.next()) |row| : (i += 1) try std.testing.expectEqualStrings(v2_raw_strings[i], row.getColumn(0).?.asBytes().?);
     try std.testing.expectEqual(v2_raw_strings.len, i);
 }
+
+test "RowIterator frees its arena when exhausted without deinit" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, false, .uncompressed);
+    defer allocator.free(buffer);
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var it = reader.rowIterator();
+    // No deinit: once next() returns null nothing may be left allocated.
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
+test "StreamingRowIterator retries a row group whose load failed" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, false, .uncompressed);
+    defer allocator.free(buffer);
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var it = reader.rowIteratorStreaming();
+    defer it.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    reader.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, it.next());
+    reader.allocator = allocator;
+
+    var count: usize = 0;
+    var buf: [32]u8 = undefined;
+    while (try it.next()) |row| : (count += 1) {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, count, false)) |s| try std.testing.expectEqualStrings(s, v.asBytes().?) else try std.testing.expect(v.isNull());
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+}

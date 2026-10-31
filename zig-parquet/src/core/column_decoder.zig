@@ -24,6 +24,11 @@ pub const Optional = types.Optional;
 pub const Int96 = types.Int96;
 pub const Value = value_mod.Value;
 
+/// Internal to `DynamicReader`; not part of the public API. This module is
+/// re-exported as `parquet.internals.column_decoder`, but setting this flag from
+/// outside yields `bytes_val` slices that dangle once the caller's page buffers
+/// are freed.
+///
 /// Byte ownership for variable-length BYTE_ARRAY values decoded from PLAIN and
 /// dictionary pages (V1 and V2; not FIXED_LEN_BYTE_ARRAY, decimals or delta
 /// encodings, which always copy).

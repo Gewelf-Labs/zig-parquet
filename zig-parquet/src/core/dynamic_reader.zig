@@ -291,7 +291,12 @@ pub const DynamicReader = struct {
                     self.freeCurrentRows();
                 }
 
-                if (self.current_rg >= self.num_rgs) return null;
+                if (self.current_rg >= self.num_rgs) {
+                    // Exhausted: release the arena so iterating to the end
+                    // without deinit() leaks nothing.
+                    _ = self.arena.reset(.free_all);
+                    return null;
+                }
 
                 const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices, &self.arena);
                 self.current_rg += 1;
@@ -384,8 +389,10 @@ pub const DynamicReader = struct {
             while (self.cursor >= self.num_rows) {
                 self.freeGroup();
                 if (self.current_rg >= self.reader.metadata.row_groups.len) return null;
+                // Advance only after a successful load, as RowIterator does, so
+                // a failed group is retried by the next call.
+                try self.loadGroup(self.current_rg);
                 self.current_rg += 1;
-                try self.loadGroup(self.current_rg - 1);
             }
             const r = self.cursor;
             self.cursor += 1;
@@ -885,9 +892,6 @@ pub const DynamicReader = struct {
             value_mod.bytes_arena_allocator
         else
             null;
-        const prev_borrow = column_decoder.borrow_bytes;
-        column_decoder.borrow_bytes = borrow_arena != null;
-        defer column_decoder.borrow_bytes = prev_borrow;
         // Page buffers (the whole chunk and every decompressed page) go to the
         // arena when borrowing and are then never freed here: an arena free of
         // its last allocation would hand the bytes to the next page. The chunk
@@ -903,6 +907,13 @@ pub const DynamicReader = struct {
             null;
         defer if (owned_page_data) |pd| if (free_pages) page_alloc.free(pd);
         const page_data: []const u8 = owned_page_data orelse override_page_data.?;
+
+        // Set only after the chunk read: no I/O happens below while the
+        // threadlocal flag is on, so an evented Io cannot run another decoder
+        // on this thread with it set.
+        const prev_borrow = column_decoder.borrow_bytes;
+        column_decoder.borrow_bytes = borrow_arena != null;
+        defer column_decoder.borrow_bytes = prev_borrow;
 
         var pos: usize = 0;
 
