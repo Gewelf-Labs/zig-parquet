@@ -24,19 +24,27 @@ pub const Statistics = struct {
         self.* = .{};
     }
 
+    /// Copy `src` into `slot`, freeing any earlier value (a repeated Thrift field).
+    fn replaceBytes(allocator: std.mem.Allocator, slot: *?[]const u8, src: []const u8) !void {
+        const copy = try allocator.dupe(u8, src);
+        if (slot.*) |old| allocator.free(old);
+        slot.* = copy;
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var stats = Self{};
+        errdefer stats.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
-                1 => stats.max = try allocator.dupe(u8, try reader.readBinary()),
-                2 => stats.min = try allocator.dupe(u8, try reader.readBinary()),
+                1 => try replaceBytes(allocator, &stats.max, try reader.readBinary()),
+                2 => try replaceBytes(allocator, &stats.min, try reader.readBinary()),
                 3 => stats.null_count = try reader.readI64(),
                 4 => stats.distinct_count = try reader.readI64(),
-                5 => stats.max_value = try allocator.dupe(u8, try reader.readBinary()),
-                6 => stats.min_value = try allocator.dupe(u8, try reader.readBinary()),
+                5 => try replaceBytes(allocator, &stats.max_value, try reader.readBinary()),
+                6 => try replaceBytes(allocator, &stats.min_value, try reader.readBinary()),
                 else => try reader.skip(field.field_type),
             }
         }
@@ -269,6 +277,7 @@ pub const GeospatialStatistics = struct {
         reader.resetFieldTracking();
 
         var stats = Self{};
+        errdefer stats.deinit(allocator);
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
@@ -276,10 +285,12 @@ pub const GeospatialStatistics = struct {
                 2 => {
                     const list_header = try reader.readListHeader();
                     try reader.checkListFits(list_header.size);
-                    var types = try allocator.alloc(i32, list_header.size);
+                    const types = try allocator.alloc(i32, list_header.size);
+                    errdefer allocator.free(types);
                     for (0..list_header.size) |i| {
                         types[i] = try reader.readI32();
                     }
+                    if (stats.geospatial_types) |old| allocator.free(old);
                     stats.geospatial_types = types;
                 },
                 else => try reader.skip(field.field_type),

@@ -24,16 +24,27 @@ pub const FileMetaData = struct {
     /// Free everything parse() allocated. Fields still at their defaults are skipped,
     /// so this is safe on a partially filled value. Leaves `self` empty.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        for (self.schema) |*elem| freeSchemaElement(allocator, elem);
-        allocator.free(self.schema);
-        for (self.row_groups) |*rg| freeRowGroup(allocator, rg);
-        allocator.free(self.row_groups);
-        if (self.key_value_metadata) |kvs| {
-            for (kvs) |*kv| freeKeyValue(allocator, kv);
-            allocator.free(kvs);
-        }
+        freeSchema(allocator, self.schema);
+        freeRowGroups(allocator, self.row_groups);
+        if (self.key_value_metadata) |kvs| freeKeyValues(allocator, kvs);
         if (self.created_by) |cb| allocator.free(cb);
         self.* = .{};
+    }
+
+    // Free helpers shared by deinit and by the replace-on-duplicate-field paths in parse().
+    fn freeSchema(allocator: std.mem.Allocator, schema: []SchemaElement) void {
+        for (schema) |*elem| elem.deinit(allocator);
+        allocator.free(schema);
+    }
+
+    fn freeRowGroups(allocator: std.mem.Allocator, row_groups: []RowGroup) void {
+        for (row_groups) |*rg| rg.deinit(allocator);
+        allocator.free(row_groups);
+    }
+
+    fn freeKeyValues(allocator: std.mem.Allocator, kvs: []KeyValue) void {
+        for (kvs) |*kv| kv.deinit(allocator);
+        allocator.free(kvs);
     }
 
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
@@ -51,13 +62,15 @@ pub const FileMetaData = struct {
                     const schema_list = try allocator.alloc(SchemaElement, list_header.size);
                     var parsed: usize = 0;
                     errdefer {
-                        for (schema_list[0..parsed]) |*elem| freeSchemaElement(allocator, elem);
+                        for (schema_list[0..parsed]) |*elem| elem.deinit(allocator);
                         allocator.free(schema_list);
                     }
                     for (schema_list) |*slot| {
                         slot.* = try SchemaElement.parse(allocator, reader);
                         parsed += 1;
                     }
+                    // A repeated field 2 replaces the earlier list; free it so it does not leak.
+                    freeSchema(allocator, meta.schema);
                     meta.schema = schema_list;
                 },
                 3 => meta.num_rows = try reader.readI64(),
@@ -67,13 +80,15 @@ pub const FileMetaData = struct {
                     const row_groups_list = try allocator.alloc(RowGroup, list_header.size);
                     var parsed: usize = 0;
                     errdefer {
-                        for (row_groups_list[0..parsed]) |*rg| freeRowGroup(allocator, rg);
+                        for (row_groups_list[0..parsed]) |*rg| rg.deinit(allocator);
                         allocator.free(row_groups_list);
                     }
                     for (row_groups_list) |*slot| {
                         slot.* = try RowGroup.parse(allocator, reader);
                         parsed += 1;
                     }
+                    // A repeated field 4 replaces the earlier list; free it so it does not leak.
+                    freeRowGroups(allocator, meta.row_groups);
                     meta.row_groups = row_groups_list;
                 },
                 5 => {
@@ -82,16 +97,22 @@ pub const FileMetaData = struct {
                     const kvs = try allocator.alloc(KeyValue, list_header.size);
                     var parsed: usize = 0;
                     errdefer {
-                        for (kvs[0..parsed]) |*kv| freeKeyValue(allocator, kv);
+                        for (kvs[0..parsed]) |*kv| kv.deinit(allocator);
                         allocator.free(kvs);
                     }
                     for (kvs) |*slot| {
                         slot.* = try KeyValue.parse(allocator, reader);
                         parsed += 1;
                     }
+                    // A repeated field 5 replaces the earlier list; free it so it does not leak.
+                    if (meta.key_value_metadata) |old| freeKeyValues(allocator, old);
                     meta.key_value_metadata = kvs;
                 },
-                6 => meta.created_by = try allocator.dupe(u8, try reader.readString()),
+                6 => {
+                    const cb = try allocator.dupe(u8, try reader.readString());
+                    if (meta.created_by) |old| allocator.free(old);
+                    meta.created_by = cb;
+                },
                 else => try reader.skip(field.field_type),
             }
         }
@@ -137,41 +158,3 @@ pub const FileMetaData = struct {
         try writer.writeStructEnd();
     }
 };
-
-// Element-level frees used by FileMetaData.deinit and the partial-parse errdefers.
-// Each mirrors the allocations made by the matching parse(); see DynamicReader.deinit.
-
-fn freeSchemaElement(allocator: std.mem.Allocator, elem: *SchemaElement) void {
-    if (elem.name.len > 0) allocator.free(elem.name);
-    if (elem.logical_type) |lt| switch (lt) {
-        .geometry => |g| if (g.crs) |crs| allocator.free(crs),
-        .geography => |g| if (g.crs) |crs| allocator.free(crs),
-        else => {},
-    };
-    elem.* = .{};
-}
-
-fn freeColumnChunk(allocator: std.mem.Allocator, col: *row_group_mod.ColumnChunk) void {
-    if (col.file_path) |fp| allocator.free(fp);
-    if (col.meta_data) |*md| {
-        allocator.free(md.encodings);
-        for (md.path_in_schema) |path| allocator.free(path);
-        allocator.free(md.path_in_schema);
-        if (md.statistics) |*stats| stats.deinit(allocator);
-        if (md.geospatial_statistics) |*geo| geo.deinit(allocator);
-    }
-    col.* = .{};
-}
-
-fn freeRowGroup(allocator: std.mem.Allocator, rg: *RowGroup) void {
-    for (rg.columns) |*col| freeColumnChunk(allocator, col);
-    allocator.free(rg.columns);
-    if (rg.sorting_columns) |sc| allocator.free(sc);
-    rg.* = .{};
-}
-
-fn freeKeyValue(allocator: std.mem.Allocator, kv: *KeyValue) void {
-    if (kv.key.len > 0) allocator.free(kv.key);
-    if (kv.value) |v| allocator.free(v);
-    kv.* = .{};
-}

@@ -19,8 +19,17 @@ pub const RowGroup = struct {
 
     const Self = @This();
 
+    /// Free everything parse() allocated. Safe on a partially filled value.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (self.columns) |*col| col.deinit(allocator);
+        allocator.free(self.columns);
+        if (self.sorting_columns) |sc| allocator.free(sc);
+        self.* = .{};
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var rg = Self{};
+        errdefer rg.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -29,10 +38,18 @@ pub const RowGroup = struct {
                 1 => {
                     const list_header = try reader.readListHeader();
                     try reader.checkListFits(list_header.size);
-                    var columns_list = try allocator.alloc(ColumnChunk, list_header.size);
-                    for (0..list_header.size) |i| {
-                        columns_list[i] = try ColumnChunk.parse(allocator, reader);
+                    const columns_list = try allocator.alloc(ColumnChunk, list_header.size);
+                    var parsed: usize = 0;
+                    errdefer {
+                        for (columns_list[0..parsed]) |*col| col.deinit(allocator);
+                        allocator.free(columns_list);
                     }
+                    for (columns_list) |*slot| {
+                        slot.* = try ColumnChunk.parse(allocator, reader);
+                        parsed += 1;
+                    }
+                    for (rg.columns) |*col| col.deinit(allocator);
+                    allocator.free(rg.columns);
                     rg.columns = columns_list;
                 },
                 2 => rg.total_byte_size = try reader.readI64(),
@@ -40,10 +57,12 @@ pub const RowGroup = struct {
                 4 => {
                     const list_header = try reader.readListHeader();
                     try reader.checkListFits(list_header.size);
-                    var sorting_list = try allocator.alloc(SortingColumn, list_header.size);
-                    for (0..list_header.size) |i| {
-                        sorting_list[i] = try SortingColumn.parse(reader);
+                    const sorting_list = try allocator.alloc(SortingColumn, list_header.size);
+                    errdefer allocator.free(sorting_list);
+                    for (sorting_list) |*slot| {
+                        slot.* = try SortingColumn.parse(reader);
                     }
+                    if (rg.sorting_columns) |old| allocator.free(old);
                     rg.sorting_columns = sorting_list;
                 },
                 5 => rg.file_offset = try reader.readI64(),
@@ -148,15 +167,31 @@ pub const KeyValue = struct {
 
     const Self = @This();
 
+    /// Free the key and value. Safe on a partially filled value.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.key.len > 0) allocator.free(self.key);
+        if (self.value) |v| allocator.free(v);
+        self.* = .{};
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var kv = Self{};
+        errdefer kv.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
-                1 => kv.key = try allocator.dupe(u8, try reader.readString()),
-                2 => kv.value = try allocator.dupe(u8, try reader.readString()),
+                1 => {
+                    const key = try allocator.dupe(u8, try reader.readString());
+                    if (kv.key.len > 0) allocator.free(kv.key);
+                    kv.key = key;
+                },
+                2 => {
+                    const value = try allocator.dupe(u8, try reader.readString());
+                    if (kv.value) |old| allocator.free(old);
+                    kv.value = value;
+                },
                 else => try reader.skip(field.field_type),
             }
         }
