@@ -345,3 +345,8 @@ test "PageIterator validation disabled ignores CRC" {
     // CRC should still be present (but not validated)
     try std.testing.expect(page.header.crc != null);
 }
+
+test {
+    // Pulls in the slicing-by-8 CRC tests (crc32.zig).
+    _ = @import("../core/crc32.zig");
+}

@@ -220,7 +220,8 @@ pub const PageIterator = struct {
 
     /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
     fn computePageCrc(data: []const u8) i32 {
-        return @bitCast(std.hash.Crc32.hash(data));
+        const crc32 = @import("crc32.zig");
+        return @bitCast(crc32.hash(data));
     }
 
     /// Initialize a page iterator
