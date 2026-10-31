@@ -3,7 +3,7 @@
   "checkpoint_id": "01M67V55TADV7E3D595XJPWS1A",
   "session_id": "4a418477-b813-4383-add3-4d1bca26fb93",
   "strategy": "manual-commit",
-  "created_at": "2026-10-31T02:03:29.8944336Z",
+  "created_at": "2026-10-31T02:03:42.3352539Z",
   "branch": "agent/zig-parquet-perf-compat-dc9ccc",
   "checkpoints_count": 1,
   "save_step_count": 15,
@@ -14,21 +14,21 @@
   "agent": "Claude Code",
   "model": "claude-fable-5-1",
   "turn_id": "c71226a9d68a",
-  "checkpoint_transcript_start": 1115,
-  "transcript_lines_at_start": 1115,
-  "compact_transcript_start": 109,
+  "checkpoint_transcript_start": 1123,
+  "transcript_lines_at_start": 1123,
+  "compact_transcript_start": 110,
   "token_usage": {
-    "input_tokens": 32,
-    "cache_creation_tokens": 313,
-    "cache_read_tokens": 306306,
-    "output_tokens": 249,
-    "api_call_count": 1,
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0,
     "subagent_tokens": {
-      "input_tokens": 0,
-      "cache_creation_tokens": 0,
-      "cache_read_tokens": 0,
-      "output_tokens": 0,
-      "api_call_count": 0
+      "input_tokens": 12,
+      "cache_creation_tokens": 6916,
+      "cache_read_tokens": 914389,
+      "output_tokens": 4413,
+      "api_call_count": 6
     }
   },
   "redaction": {
