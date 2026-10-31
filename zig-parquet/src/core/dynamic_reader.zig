@@ -61,7 +61,7 @@ pub const DynamicReaderError = errors_mod.DynamicReaderError;
 
 /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
 fn computePageCrc(data: []const u8) i32 {
-    return @bitCast(std.hash.Crc32.hash(data));
+    return @bitCast(@import("crc32.zig").hash(data));
 }
 
 /// Safely cast i32 page size/count to usize, validating non-negative.
