@@ -471,13 +471,10 @@ test "bit-packed run round trips for widths 1..31" {
             try std.testing.expectEqualSlices(u32, values, got[0..count]);
             for (got[count..]) |z| try std.testing.expectEqual(@as(u32, 0), z);
 
-            // rle.decode cross-check, limited to bw <= 16: rle.zig's decodeBitPacked
-            // computes (bit_offset + bit_width + 7) in u5 and overflows above that.
-            if (bw <= 16) {
-                const decoded = try rle.decode(allocator, buf.items, bw, count);
-                defer allocator.free(decoded);
-                try std.testing.expectEqualSlices(u32, values, decoded);
-            }
+            // Cross-check against the real decoder (fast path + checked tail).
+            const decoded = try rle.decode(allocator, buf.items, bw, count);
+            defer allocator.free(decoded);
+            try std.testing.expectEqualSlices(u32, values, decoded);
         }
     }
 }
