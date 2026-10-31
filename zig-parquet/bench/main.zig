@@ -222,6 +222,13 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
         try sc.write(gpa, io, path, &data);
         best_write = @min(best_write, w0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
 
+        // Untimed warm open: Windows stalls 5-7 ms on the first open of a
+        // just-written file (AV scan / write-back), which is not reader cost.
+        {
+            const warm = try std.Io.Dir.cwd().openFile(io, path, .{});
+            warm.close(io);
+        }
+
         const r0 = std.Io.Timestamp.now(io, .awake);
         read_rows = try readAll(gpa, io, path);
         best_read = @min(best_read, r0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
