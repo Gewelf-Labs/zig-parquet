@@ -48,7 +48,7 @@ test "multi-page: plain byte array column" {
     try writer.begin();
 
     for (0..row_count) |i| {
-        const name = try allocator.print("name_{d:0>5}", .{i});
+        const name = try std.fmt.allocPrint(allocator, "name_{d:0>5}", .{i});
         defer allocator.free(name);
         try writer.setInt32(0, @intCast(i));
         try writer.setBytes(1, name);
@@ -73,7 +73,7 @@ test "multi-page: plain byte array column" {
 
     for (rows, 0..) |row, count| {
         try std.testing.expectEqual(@as(i32, @intCast(count)), row.getColumn(0).?.asInt32().?);
-        const expected = try allocator.print("name_{d:0>5}", .{count});
+        const expected = try std.fmt.allocPrint(allocator, "name_{d:0>5}", .{count});
         defer allocator.free(expected);
         try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
     }
@@ -96,7 +96,7 @@ test "multi-page: nullable byte array column" {
         if (i % 3 == 0) {
             try writer.setNull(1);
         } else {
-            const name = try allocator.print("name_{d}", .{i});
+            const name = try std.fmt.allocPrint(allocator, "name_{d}", .{i});
             defer allocator.free(name);
             try writer.setBytes(1, name);
         }
@@ -124,7 +124,7 @@ test "multi-page: nullable byte array column" {
         if (count % 3 == 0) {
             try std.testing.expect(row.getColumn(1).?.isNull());
         } else {
-            const expected = try allocator.print("name_{d}", .{count});
+            const expected = try std.fmt.allocPrint(allocator, "name_{d}", .{count});
             defer allocator.free(expected);
             try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
         }
@@ -759,7 +759,7 @@ test "multi-page: map column" {
         try writer.beginMap(1);
         for (0..entry_count) |j| {
             try writer.beginMapEntry(1);
-            const key = try allocator.print("k{d}_{d}", .{ i, j });
+            const key = try std.fmt.allocPrint(allocator, "k{d}_{d}", .{ i, j });
             defer allocator.free(key);
             try writer.appendNestedBytes(1, key);
             try writer.appendNestedValue(1, .{ .int32_val = @intCast(i * 10 + j) });
@@ -791,7 +791,7 @@ test "multi-page: map column" {
         const expected_count = (count % 4) + 1;
         try std.testing.expectEqual(expected_count, map.len);
         for (map, 0..) |entry, j| {
-            const expected_key = try allocator.print("k{d}_{d}", .{ count, j });
+            const expected_key = try std.fmt.allocPrint(allocator, "k{d}_{d}", .{ count, j });
             defer allocator.free(expected_key);
             try std.testing.expectEqualStrings(expected_key, entry.key.asBytes().?);
             try std.testing.expectEqual(@as(i32, @intCast(count * 10 + j)), entry.value.asInt32().?);
@@ -839,7 +839,7 @@ test "multi-page: struct with list field" {
 
         // Now build the struct with label and the pre-built tags list
         try writer.beginStruct(1);
-        const label = try allocator.print("label_{d}", .{i});
+        const label = try std.fmt.allocPrint(allocator, "label_{d}", .{i});
         defer allocator.free(label);
         try writer.setStructFieldBytes(1, 0, label);
         try writer.setStructField(1, 1, tags_val);
@@ -866,7 +866,7 @@ test "multi-page: struct with list field" {
     for (rows, 0..) |row, count| {
         try std.testing.expectEqual(@as(i32, @intCast(count)), row.getColumn(0).?.asInt32().?);
         const s = row.getColumn(1).?;
-        const expected_label = try allocator.print("label_{d}", .{count});
+        const expected_label = try std.fmt.allocPrint(allocator, "label_{d}", .{count});
         defer allocator.free(expected_label);
         try std.testing.expectEqualStrings(expected_label, s.getField("label").?.asBytes().?);
         const tags = s.getField("tags").?.asList().?;

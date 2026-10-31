@@ -25,7 +25,7 @@ const dictionary = @import("encoding/dictionary.zig");
 const Allocator = std.mem.Allocator;
 
 fn fmtZ(allocator: Allocator, comptime fmt_str: []const u8, args: anytype) error{OutOfMemory}![:0]u8 {
-    return allocator.printSentinel(fmt_str, args, 0);
+    return std.fmt.allocPrintSentinel(allocator, fmt_str, args, 0);
 }
 const ArrowSchema = arrow.ArrowSchema;
 const ArrowArray = arrow.ArrowArray;

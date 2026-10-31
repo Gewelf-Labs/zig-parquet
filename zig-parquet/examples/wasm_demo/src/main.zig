@@ -604,7 +604,7 @@ pub fn main() !void {
     std.debug.print("zig-parquet WASM — full API surface test\n", .{});
     std.debug.print("=========================================\n\n", .{});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
