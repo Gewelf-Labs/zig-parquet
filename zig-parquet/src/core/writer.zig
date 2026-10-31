@@ -1261,8 +1261,6 @@ pub const Writer = struct {
                 return generateSchemaFromNodeStatic(schema, idx, name, child, .optional);
             },
             .list => |element| {
-                const num_element_children = try countStructChildren(element);
-
                 if (idx >= schema.len) return error.InvalidSchema;
                 schema[idx] = .{
                     .type_ = null,
@@ -1284,7 +1282,7 @@ pub const Writer = struct {
                     .type_length = null,
                     .repetition_type = .repeated,
                     .name = "list",
-                    .num_children = num_element_children,
+                    .num_children = 1, // the repeated group holds exactly one "element" child
                     .converted_type = null,
                     .scale = null,
                     .precision = null,
@@ -1387,14 +1385,6 @@ pub const Writer = struct {
         }
 
         return idx;
-    }
-
-    fn countStructChildren(node: *const SchemaNode) WriterError!i32 {
-        return switch (node.*) {
-            .optional => |child| countStructChildren(child),
-            .struct_ => |s| safe.castTo(i32, s.fields.len),
-            else => 1,
-        };
     }
 
     fn makePrimitiveElement(
