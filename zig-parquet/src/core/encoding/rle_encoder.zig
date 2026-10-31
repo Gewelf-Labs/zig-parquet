@@ -95,53 +95,28 @@ fn encodeBitPackedRun(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     const indicator = (num_groups << 1) | 1;
     try writeVarInt(buffer, allocator, indicator);
 
-    // Pack values into bytes
-    const total_bits = num_groups * 8 * @as(usize, bit_width);
-    const total_bytes = (total_bits + 7) / 8;
-
+    // 8 values of bit_width bits = bit_width bytes per group; padding stays zero.
+    const total_bytes = num_groups * @as(usize, bit_width);
     const start_pos = buffer.items.len;
     try buffer.appendNTimes(allocator, 0, total_bytes);
+    const out = buffer.items[start_pos..];
 
-    var bit_pos: usize = 0;
-    for (0..count) |i| {
-        const value = if (i < values.len) values[i] else 0;
-        try writeBits(buffer.items[start_pos..], bit_pos, value, bit_width);
-        bit_pos += bit_width;
-    }
-
-    // Pad remaining values in last group with 0
-    const remainder = count % 8;
-    if (remainder != 0) {
-        for (remainder..8) |_| {
-            // Already 0 from appendNTimes
-            bit_pos += bit_width;
+    const mask: u64 = (@as(u64, 1) << bit_width) - 1;
+    var acc: u64 = 0;
+    var acc_bits: u6 = 0; // < 8 at the top of each iteration, so + bit_width (<= 31) < 64
+    var pos: usize = 0;
+    // Values past values.len (padding up to count) are zero, which `out` already holds.
+    for (values[0..@min(count, values.len)]) |v| {
+        acc |= (@as(u64, v) & mask) << acc_bits;
+        acc_bits += @as(u6, bit_width);
+        while (acc_bits >= 8) {
+            out[pos] = @truncate(acc); // low byte of acc: exactly the byte being emitted
+            pos += 1;
+            acc >>= 8;
+            acc_bits -= 8;
         }
     }
-}
-
-/// Write a value using bit_width bits starting at bit_pos
-fn writeBits(bytes: []u8, bit_pos: usize, value: u32, bit_width: u5) !void {
-    if (bit_width == 0) return;
-
-    var remaining_bits: u5 = bit_width;
-    var current_bit = bit_pos;
-    var v = value;
-
-    while (remaining_bits > 0) {
-        const byte_idx = current_bit / 8;
-        const bit_offset: u3 = safe.castTo(u3, current_bit % 8) catch unreachable; // % 8 guarantees it fits in u3
-        const bits_in_byte: u4 = safe.castTo(u4, @min(8 - @as(u4, bit_offset), remaining_bits)) catch unreachable; // @min of values <= 8 fits in u4 (max 15)
-
-        if (byte_idx >= bytes.len) return;
-
-        // bits_in_byte is <= 8, so the shift and mask are well within u16/u8 limits
-        const mask: u8 = safe.castTo(u8, (@as(u16, 1) << bits_in_byte) - 1) catch unreachable; // bits_in_byte <= 8, so (1 << bits_in_byte) - 1 <= 255
-        bytes[byte_idx] |= @as(u8, @truncate(v & mask)) << bit_offset;
-
-        v >>= safe.castTo(u5, bits_in_byte) catch unreachable; // bits_in_byte is <= 8
-        current_bit += bits_in_byte;
-        remaining_bits -= safe.castTo(u5, bits_in_byte) catch unreachable; // bits_in_byte is <= 8, fits in u5
-    }
+    if (acc_bits > 0) out[pos] = @truncate(acc); // low byte of acc: the final partial byte
 }
 
 /// Write a varint to the buffer
@@ -403,4 +378,76 @@ test "computeBitWidth" {
     try std.testing.expectEqual(@as(u5, 2), computeBitWidth(3));
     try std.testing.expectEqual(@as(u5, 3), computeBitWidth(4));
     try std.testing.expectEqual(@as(u5, 3), computeBitWidth(7));
+}
+
+/// Reference LSB-first unpacker, independent of rle.zig's decoder.
+fn unpackRef(bytes: []const u8, bit_width: u5, out: []u32) void {
+    var bit: usize = 0;
+    for (out) |*o| {
+        var v: u32 = 0;
+        for (0..bit_width) |b| {
+            const pos = bit + b;
+            const bit_in: u32 = (bytes[pos / 8] >> @as(u3, @truncate(pos % 8))) & 1; // % 8 fits u3
+            const sh = safe.castTo(u5, b) catch unreachable; // b < bit_width <= 31
+            v |= bit_in << sh;
+        }
+        o.* = v;
+        bit += bit_width;
+    }
+}
+
+test "bit-packed run round trips for widths 1..31" {
+    const allocator = std.testing.allocator;
+    const rle = @import("rle.zig");
+
+    const counts = [_]usize{ 1, 8, 9, 100, 1000 };
+    var prng = std.Random.DefaultPrng.init(0x3131);
+    const random = prng.random();
+    for (1..32) |bw_int| {
+        const bw = safe.castTo(u5, bw_int) catch unreachable; // 1..31 fits u5
+        const max_val: u32 = (@as(u32, 1) << bw) - 1;
+        for (counts) |count| {
+            const values = try allocator.alloc(u32, count);
+            defer allocator.free(values);
+            for (values) |*v| v.* = random.int(u32) & max_val;
+
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            try encodeBitPackedRun(&buf, allocator, values, count, bw);
+
+            // Skip the varint run header, then unpack the whole groups of 8.
+            var hdr: usize = 0;
+            while ((buf.items[hdr] & 0x80) != 0) hdr += 1;
+            hdr += 1;
+            const padded = (count + 7) / 8 * 8;
+            const got = try allocator.alloc(u32, padded);
+            defer allocator.free(got);
+            unpackRef(buf.items[hdr..], bw, got);
+            try std.testing.expectEqualSlices(u32, values, got[0..count]);
+            for (got[count..]) |z| try std.testing.expectEqual(@as(u32, 0), z);
+
+            // rle.decode cross-check, limited to bw <= 16: rle.zig's decodeBitPacked
+            // computes (bit_offset + bit_width + 7) in u5 and overflows above that.
+            if (bw <= 16) {
+                const decoded = try rle.decode(allocator, buf.items, bw, count);
+                defer allocator.free(decoded);
+                try std.testing.expectEqualSlices(u32, values, decoded);
+            }
+        }
+    }
+}
+
+test "bit-packed run pads short input with zeros" {
+    const allocator = std.testing.allocator;
+    const rle = @import("rle.zig");
+
+    // count (8) exceeds values.len (5): the tail of the group must encode as 0
+    const values = [_]u32{ 5, 1, 7, 2, 6 };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try encodeBitPackedRun(&buf, allocator, &values, 8, 3);
+
+    const decoded = try rle.decode(allocator, buf.items, 3, 8);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1, 7, 2, 6, 0, 0, 0 }, decoded);
 }
