@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const safe = @import("../safe.zig");
+const Optional = @import("../types.zig").Optional;
 
 /// Encode values using RLE/bit-packed hybrid encoding
 /// For simplicity, we primarily use RLE runs since definition levels often repeat.
@@ -183,6 +184,50 @@ pub fn encodeDefLevelsWithLength(allocator: std.mem.Allocator, is_defined: []con
     @memcpy(result[4..], encoded);
 
     return result;
+}
+
+/// Append V1 definition levels (bit width 1, u32 length prefix) for a flat
+/// column straight from its values. Byte-identical to
+/// `encodeDefLevelsWithLength` on the matching is-defined slice: same run-splitting rule as `encode`.
+pub fn appendDefLevelsWithLength(comptime T: type, out: *std.ArrayList(u8), allocator: std.mem.Allocator, values: []const Optional(T)) !void {
+    const len_pos = out.items.len;
+    try out.appendNTimes(allocator, 0, 4);
+    const body_start = out.items.len;
+    const n = values.len;
+    var i: usize = 0;
+    while (i < n) {
+        const d = values[i] != .null_value;
+        var run_len: usize = 1;
+        while (i + run_len < n and (values[i + run_len] != .null_value) == d and run_len < 0x7FFFFFFF) run_len += 1;
+        if (run_len >= 8 or i + run_len == n) {
+            try writeVarInt(out, allocator, run_len << 1);
+            try out.append(allocator, @intFromBool(d));
+            i += run_len;
+            continue;
+        }
+        // Bit-pack until the next run of >= 8, exactly like `encode`.
+        var pack_count: usize = 0;
+        var j = i;
+        while (j < n) {
+            const dj = values[j] != .null_value;
+            var next_run: usize = 1;
+            while (j + next_run < n and (values[j + next_run] != .null_value) == dj) next_run += 1;
+            if (next_run >= 8) break;
+            pack_count += next_run;
+            j += next_run;
+        }
+        const count = @min(((pack_count + 7) / 8) * 8, n - i);
+        const groups = (count + 7) / 8;
+        try writeVarInt(out, allocator, (groups << 1) | 1);
+        const start = out.items.len;
+        try out.appendNTimes(allocator, 0, groups);
+        for (0..count) |k| {
+            if (values[i + k] != .null_value) out.items[start + k / 8] |= @as(u8, 1) << @as(u3, @truncate(k)); // k % 8
+        }
+        i += count;
+    }
+    const body_len = try safe.castTo(u32, out.items.len - body_start);
+    std.mem.writeInt(u32, out.items[len_pos..][0..4], body_len, .little);
 }
 
 /// Encode boolean values using RLE/bit-packed hybrid encoding.
@@ -450,4 +495,41 @@ test "bit-packed run pads short input with zeros" {
     const decoded = try rle.decode(allocator, buf.items, 3, 8);
     defer allocator.free(decoded);
     try std.testing.expectEqualSlices(u32, &.{ 5, 1, 7, 2, 6, 0, 0, 0 }, decoded);
+}
+
+test "appendDefLevelsWithLength is byte-identical to encodeDefLevelsWithLength" {
+    const allocator = std.testing.allocator;
+    const sizes = [_]usize{ 0, 1, 7, 8, 9, 15, 16, 17, 100, 1000 };
+    const rates = [_]u32{ 0, 5, 33, 50, 95, 100 }; // percent null
+    var prng = std.Random.DefaultPrng.init(0x3232);
+    const random = prng.random();
+
+    for (sizes) |n| {
+        // Random null rates, plus the bench pattern (every third value null).
+        for (0..rates.len + 1) |case| {
+            const opt = try allocator.alloc(Optional(i64), n);
+            defer allocator.free(opt);
+            const is_def = try allocator.alloc(bool, n);
+            defer allocator.free(is_def);
+            for (opt, is_def, 0..) |*o, *d, i| {
+                const is_null = if (case < rates.len)
+                    random.uintLessThan(u32, 100) < rates[case]
+                else
+                    i % 3 == 2;
+                d.* = !is_null;
+                o.* = if (is_null) .null_value else .{ .value = @as(i64, @intCast(i)) };
+            }
+
+            // Pre-existing bytes must be kept: the helper appends.
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(allocator);
+            try out.append(allocator, 0xAB);
+            try appendDefLevelsWithLength(i64, &out, allocator, opt);
+
+            const want = try encodeDefLevelsWithLength(allocator, is_def);
+            defer allocator.free(want);
+            try std.testing.expectEqual(@as(u8, 0xAB), out.items[0]);
+            try std.testing.expectEqualSlices(u8, want, out.items[1..]);
+        }
+    }
 }
