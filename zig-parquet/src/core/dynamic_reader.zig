@@ -479,7 +479,7 @@ pub const DynamicReader = struct {
             }
 
             // Decode using the substituted buffer.
-            const decoded = try self.readColumnDynamicWithData(col_idx, row_group_index, page_result.data);
+            const decoded = try self.readColumnDynamicWithData(col_idx, row_group_index, page_result.data, false);
             // We don't use def/rep levels in the flat path; free them if present.
             if (decoded.def_levels) |dl| self.allocator.free(dl);
             if (decoded.rep_levels) |rl| self.allocator.free(rl);
@@ -604,6 +604,13 @@ pub const DynamicReader = struct {
         } else null;
         defer if (top_infos) |ti| self.allocator.free(ti);
 
+        // Levels are only needed when at least one requested column is nested.
+        const any_nested = blk: {
+            const infos = top_infos orelse break :blk false;
+            for (infos) |info| if (info.is_nested) break :blk true;
+            break :blk false;
+        };
+
         // Build set of leaf columns to read
         const leaf_needed = try self.allocator.alloc(bool, num_leaf_columns);
         defer self.allocator.free(leaf_needed);
@@ -655,7 +662,7 @@ pub const DynamicReader = struct {
 
         for (0..num_leaf_columns) |col_idx| {
             if (!leaf_needed[col_idx]) continue;
-            const result = try self.readColumnDynamic(col_idx, row_group_index);
+            const result = try self.readColumnDynamic(col_idx, row_group_index, any_nested);
             column_values[col_idx] = result.values;
             column_def_levels[col_idx] = result.def_levels;
             column_rep_levels[col_idx] = result.rep_levels;
@@ -677,8 +684,8 @@ pub const DynamicReader = struct {
     }
 
     /// Read a single column dynamically
-    fn readColumnDynamic(self: *Self, column_index: usize, row_group_index: usize) !column_decoder.DynamicDecodeResult {
-        return self.readColumnDynamicWithData(column_index, row_group_index, null);
+    fn readColumnDynamic(self: *Self, column_index: usize, row_group_index: usize, keep_levels: bool) !column_decoder.DynamicDecodeResult {
+        return self.readColumnDynamicWithData(column_index, row_group_index, null, keep_levels);
     }
 
     /// Read a single column, optionally using caller-supplied page bytes.
@@ -692,6 +699,7 @@ pub const DynamicReader = struct {
         column_index: usize,
         row_group_index: usize,
         override_page_data: ?[]const u8,
+        keep_levels: bool,
     ) !column_decoder.DynamicDecodeResult {
         const rg = &self.metadata.row_groups[row_group_index];
         if (column_index >= rg.columns.len) return error.InvalidArgument;
@@ -911,18 +919,23 @@ pub const DynamicReader = struct {
                     value_encoding,
                 );
 
-                // Append values (transfer ownership)
-                try all_values.appendSlice(self.allocator, page_result.values);
-                self.allocator.free(page_result.values);
+                // Take ownership of the page's values. The first page's buffer becomes
+                // the chunk buffer, so single-page chunks are never copied.
+                if (all_values.capacity == 0) {
+                    all_values = .fromOwnedSlice(page_result.values);
+                } else {
+                    try all_values.appendSlice(self.allocator, page_result.values);
+                    self.allocator.free(page_result.values);
+                }
                 page_result.values = &.{};
 
-                // Append levels
+                // Levels are only consumed by nested assembly.
                 if (page_result.def_levels) |dl| {
-                    try all_def_levels.appendSlice(self.allocator, dl);
+                    if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
                 }
                 if (page_result.rep_levels) |rl| {
-                    try all_rep_levels.appendSlice(self.allocator, rl);
+                    if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
                 }
             } else if (page_header.data_page_header) |dph| {
@@ -965,18 +978,23 @@ pub const DynamicReader = struct {
                     value_encoding_v1,
                 );
 
-                // Append values (transfer ownership)
-                try all_values.appendSlice(self.allocator, page_result.values);
-                self.allocator.free(page_result.values);
+                // Take ownership of the page's values. The first page's buffer becomes
+                // the chunk buffer, so single-page chunks are never copied.
+                if (all_values.capacity == 0) {
+                    all_values = .fromOwnedSlice(page_result.values);
+                } else {
+                    try all_values.appendSlice(self.allocator, page_result.values);
+                    self.allocator.free(page_result.values);
+                }
                 page_result.values = &.{};
 
-                // Append levels
+                // Levels are only consumed by nested assembly.
                 if (page_result.def_levels) |dl| {
-                    try all_def_levels.appendSlice(self.allocator, dl);
+                    if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
                 }
                 if (page_result.rep_levels) |rl| {
-                    try all_rep_levels.appendSlice(self.allocator, rl);
+                    if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
                 }
             }
