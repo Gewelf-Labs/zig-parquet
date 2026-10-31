@@ -998,6 +998,12 @@ pub fn decodeColumnDynamicWithValueEncoding(
     const is_dict_encoded = uses_dict and
         (value_encoding == .rle_dictionary or value_encoding == .plain_dictionary);
 
+    const flat_fast_ok = !is_dict_encoded and value_encoding == .plain and max_rep_level == 0 and
+        (max_def_level == 0 or (max_def_level == 1 and schema_elem.repetition_type == .optional));
+    if (flat_fast_ok) {
+        if (try decodeFlatPlainFixed(allocator, physical_type, value_data, num_values, max_def_level, def_level_encoding, rep_level_encoding)) |r| return r;
+    }
+
     return switch (physical_type) {
         .boolean => decodeDynamicBool(allocator, schema_elem, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding),
         .int32 => decodeDynamicInt32(allocator, schema_elem, value_data, num_values, max_def_level, max_rep_level, is_dict_encoded, int32_dict, def_level_encoding, rep_level_encoding),
@@ -1701,6 +1707,72 @@ fn decodeLevelsForDynamicWithEncoding(
         .def_mask = def_mask,
         .non_null_count = non_null_count,
     };
+}
+
+/// Fast path for flat PLAIN INT32/INT64/FLOAT/DOUBLE pages: decodes straight into
+/// `Value`s with one length check per page. Returns null (caller must use the
+/// general path) when levels fail to decode or the page is short, so malformed
+/// pages keep their existing errors and lenient behavior.
+fn decodeFlatPlainFixed(
+    allocator: std.mem.Allocator,
+    physical_type: format.PhysicalType,
+    value_data: []const u8,
+    num_values: usize,
+    max_def_level: u8,
+    def_level_encoding: format.Encoding,
+    rep_level_encoding: format.Encoding,
+) !?DynamicDecodeResult {
+    const width: usize = switch (physical_type) {
+        .int32, .float => 4,
+        .int64, .double => 8,
+        else => return null,
+    };
+    const lv = decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, 0, def_level_encoding, rep_level_encoding) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer allocator.free(lv.def_mask);
+
+    const body = value_data[lv.data_offset..]; // data_offset <= len, checked by the level decoder
+    const needed = std.math.mul(usize, lv.non_null_count, width) catch std.math.maxInt(usize);
+    if (body.len < needed) {
+        if (lv.def_levels) |d| allocator.free(d);
+        return null;
+    }
+
+    const values = allocator.alloc(Value, num_values) catch |e| {
+        if (lv.def_levels) |d| allocator.free(d);
+        return e;
+    };
+    switch (physical_type) {
+        .int32 => fillPlainFixed(i32, values, body, lv.def_mask),
+        .int64 => fillPlainFixed(i64, values, body, lv.def_mask),
+        .float => fillPlainFixed(f32, values, body, lv.def_mask),
+        .double => fillPlainFixed(f64, values, body, lv.def_mask),
+        else => unreachable, // filtered by the width switch above
+    }
+    return .{ .values = values, .def_levels = lv.def_levels, .rep_levels = null };
+}
+
+fn fillPlainFixed(comptime T: type, out: []Value, body: []const u8, def_mask: []const bool) void {
+    const Bits = if (@sizeOf(T) == 4) u32 else u64;
+    var off: usize = 0;
+    for (def_mask, out) |present, *v| {
+        if (!present) {
+            v.* = .{ .null_val = {} };
+            continue;
+        }
+        // In bounds: caller checked body.len >= non_null_count * @sizeOf(T).
+        const x: T = @bitCast(std.mem.readInt(Bits, body[off..][0..@sizeOf(T)], .little));
+        v.* = switch (T) {
+            i32 => .{ .int32_val = x },
+            i64 => .{ .int64_val = x },
+            f32 => .{ .float_val = x },
+            f64 => .{ .double_val = x },
+            else => @compileError("fillPlainFixed: unsupported " ++ @typeName(T)),
+        };
+        off += @sizeOf(T);
+    }
 }
 
 fn decodeDynamicBool(
@@ -2808,4 +2880,60 @@ fn decodeByteStreamSplit(
         .def_levels = levels_info.def_levels,
         .rep_levels = levels_info.rep_levels,
     };
+}
+
+test "flat PLAIN fast path: REQUIRED int64 values" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .required, .name = "x" };
+    var data: [24]u8 = undefined;
+    std.mem.writeInt(i64, data[0..8], 1, .little);
+    std.mem.writeInt(i64, data[8..16], -2, .little);
+    std.mem.writeInt(i64, data[16..24], 3, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 1), r.values[0].int64_val);
+    try std.testing.expectEqual(@as(i64, -2), r.values[1].int64_val);
+    try std.testing.expectEqual(@as(i64, 3), r.values[2].int64_val);
+    try std.testing.expect(r.def_levels == null);
+}
+
+test "flat PLAIN fast path: OPTIONAL double with def levels" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .double, .repetition_type = .optional, .name = "d" };
+    var data: [22]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 2, .little); // RLE level block length
+    data[4] = 0x03; // bit-packed run, 1 group
+    data[5] = 0x05; // levels 1,0,1
+    std.mem.writeInt(u64, data[6..14], @bitCast(@as(f64, 1.5)), .little);
+    std.mem.writeInt(u64, data[14..22], @bitCast(@as(f64, -4.25)), .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 1.5), r.values[0].double_val);
+    try std.testing.expect(r.values[1] == .null_val);
+    try std.testing.expectEqual(@as(f64, -4.25), r.values[2].double_val);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
+}
+
+test "flat PLAIN fast path: short REQUIRED int64 keeps existing behavior" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .required, .name = "x" };
+    var data: [16]u8 = undefined; // 2 values for 3 declared
+    std.mem.writeInt(i64, data[0..8], 10, .little);
+    std.mem.writeInt(i64, data[8..16], 20, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 10), r.values[0].int64_val);
+    try std.testing.expectEqual(@as(i64, 20), r.values[1].int64_val);
+    try std.testing.expect(r.values[2] == .null_val);
+}
+
+test "flat PLAIN fast path: short OPTIONAL int32 returns EndOfData" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .optional, .name = "i" };
+    var data: [10]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 2, .little); // RLE level block length
+    data[4] = 0x03; // bit-packed run, 1 group
+    data[5] = 0x07; // levels 1,1,1 -> 3 non-null values expected
+    std.mem.writeInt(i32, data[6..10], 1, .little); // only one value present
+    try std.testing.expectError(error.EndOfData, decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain));
 }
