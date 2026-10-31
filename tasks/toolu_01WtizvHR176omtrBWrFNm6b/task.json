@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01WtizvHR176omtrBWrFNm6b",
+  "agent_id": "a3ad45bf73cce94ae",
+  "task_description": "Haiku: Phase 1 compat",
+  "token_usage": {
+    "input_tokens": 70,
+    "cache_creation_tokens": 88779,
+    "cache_read_tokens": 3617260,
+    "output_tokens": 26693,
+    "api_call_count": 35
+  },
+  "started_at": "2026-10-30T20:05:15.1212331-04:00",
+  "completed_at": "2026-10-30T20:25:53.4602177-04:00"
+}
