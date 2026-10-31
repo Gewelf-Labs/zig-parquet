@@ -199,6 +199,16 @@ std.math.add(usize, a, b) catch return error.Overflow;
 std.math.sub(usize, a, b) catch return error.Underflow;
 ```
 
+## Fast Paths
+
+Each fast path keeps its bounds check at the granularity noted and falls back to the checked code for anything it does not cover.
+
+- **`rle.decodeBitPacked`** (`src/core/encoding/rle.zig`): loads one unaligned u64 per value while 8 bytes remain; the bounds check is one `byte_pos > last_word` per value. The checked per-byte loop handles the tail and zero-fills past the end of data.
+- **`column_decoder.decodeFlatPlainFixed`** (`src/core/column_decoder.zig`): flat V1 INT32/INT64/FLOAT/DOUBLE pages; one `needed` check per page (`count * width`, overflow-checked). Returns `null` for short or non-plain pages so the general decoder handles them and malformed-page errors are unchanged.
+- **`page_writer.writePlainPageOptional`** and **`rle_encoder.appendDefLevelsWithLength`** (write side): definition levels and values are written in place into one buffer. Byte identity with the general path is tested (`PLAIN fixed-width optional page is byte-identical...`, `appendDefLevelsWithLength is byte-identical...`); other encodings keep the general path.
+- **`crc32.zig`** (slicing-by-8 CRC-32): no fallback; tested against `std.hash.Crc32` for every length 0..2047, short inputs 1..16, a 1 MiB buffer, and unaligned offsets.
+- **Zero-copy byte arrays** (`column_decoder.borrow_bytes`): slices come only from length-checked decoders (`plain.decodeByteArray`, `PlainDecoder`). Page buffers are arena-owned and outlive the values because they are freed only by the arena reset or deinit. Filtered reads, FLBA, decimals, delta encodings, `arrow_batch` and the typed decoder copy instead.
+
 ## Guidelines for New Code
 
 ### Reader

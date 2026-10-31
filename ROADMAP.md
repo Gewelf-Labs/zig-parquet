@@ -1,5 +1,7 @@
 # Roadmap
 
+**Done 2026-10-30:** Zig 0.16.0 and 0.17.0 supported from one tree, and the read/write performance pass (see `CHANGELOG.md` Unreleased and `bench/BASELINE.md`).
+
 ## Known Limitations
 
 Things that are explicitly **not supported** and will return errors:
