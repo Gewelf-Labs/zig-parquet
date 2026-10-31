@@ -56,7 +56,7 @@ make example NAME=wasm_demo OPT=ReleaseSmall
 make wasm                              # Verify WASM targets compile and link
 make validate-wild                     # Validate pqi against wild files (failures)
 make validate-wild-all                 # Validate pqi against wild files (all)
-make bench ZIG=<path>                  # Benchmark harness (ReleaseFast, zig-only codecs); `zig build bench -- <rows>` sets row count
+make bench ZIG=<path> ROWS=100000      # Benchmark harness (ReleaseFast, zig-only codecs); ROWS defaults to 1000000
 make fmt ZIG=<0.16 zig>                # zig fmt across sources (0.16 only)
 make clean                             # Remove .zig-cache and zig-out everywhere
 ```

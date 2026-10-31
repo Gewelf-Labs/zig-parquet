@@ -34,7 +34,7 @@ help:
 	@echo "  make test-cli          CLI tests only (honors CODECS, OPT)"
 	@echo "  make example NAME=...  Build an example (honors CODECS, OPT)"
 	@echo "  make wasm              Verify WASM targets compile and link (no C codecs unless CODECS is set)"
-	@echo "  make bench             Run the benchmark harness (ReleaseFast, zig-only codecs by default)"
+	@echo "  make bench [ROWS=n]    Run the benchmark harness (ReleaseFast, zig-only codecs by default)"
 	@echo "  make validate-wild     Validate pqi against wild files (failures only)"
 	@echo "  make validate-wild-all Validate pqi against wild files (show all)"
 	@echo "  make fmt               zig fmt across sources (requires ZIG=<0.16 zig>)"
@@ -90,7 +90,7 @@ wasm:
 
 .PHONY: bench
 bench:
-	cd $(LIB_DIR) && $(ZIG) build bench $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -Doptimize=ReleaseFast
+	cd $(LIB_DIR) && $(ZIG) build bench $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -Doptimize=ReleaseFast $(if $(ROWS),-- $(ROWS))
 
 .PHONY: validate-wild
 validate-wild: cli
