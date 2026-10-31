@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01ATEqWUgtoNEa7KAN7SreL3",
+  "agent_id": "aee375f50a618dd65",
+  "subagent_type": "Explore",
+  "task_description": "Inventory 0.16/0.17 API surface",
+  "token_usage": {
+    "input_tokens": 72,
+    "cache_creation_tokens": 181902,
+    "cache_read_tokens": 4687731,
+    "output_tokens": 49711,
+    "api_call_count": 36
+  },
+  "started_at": "2026-10-30T19:09:25.5939637-04:00",
+  "completed_at": "2026-10-30T19:14:27.8254713-04:00"
+}

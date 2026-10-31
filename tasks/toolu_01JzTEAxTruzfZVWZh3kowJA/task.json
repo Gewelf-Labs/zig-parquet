@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01JzTEAxTruzfZVWZh3kowJA",
+  "agent_id": "ab18127d292951eb6",
+  "subagent_type": "Explore",
+  "task_description": "Map write hot path",
+  "token_usage": {
+    "input_tokens": 96,
+    "cache_creation_tokens": 230503,
+    "cache_read_tokens": 7235293,
+    "output_tokens": 46633,
+    "api_call_count": 48
+  },
+  "started_at": "2026-10-30T19:09:25.6054648-04:00",
+  "completed_at": "2026-10-30T19:14:22.6328799-04:00"
+}

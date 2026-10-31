@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01Vvt1Sw81wKuBmwBnwyS9px",
+  "agent_id": "a2fca6e08a5536e2e",
+  "task_description": "Opus: write spec and plan",
+  "token_usage": {
+    "input_tokens": 266,
+    "cache_creation_tokens": 611249,
+    "cache_read_tokens": 32101139,
+    "output_tokens": 177924,
+    "api_call_count": 133
+  },
+  "started_at": "2026-10-30T19:16:28.9336981-04:00",
+  "completed_at": "2026-10-30T20:03:26.8237465-04:00"
+}

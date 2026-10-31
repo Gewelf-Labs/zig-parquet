@@ -1,0 +1,15 @@
+{
+  "tool_use_id": "toolu_01AiW1vMsFXrkHNsfHKCWgSu",
+  "agent_id": "a4a5a4eb29f4a51a5",
+  "subagent_type": "Explore",
+  "task_description": "Map read hot path",
+  "token_usage": {
+    "input_tokens": 28,
+    "cache_creation_tokens": 251830,
+    "cache_read_tokens": 2348774,
+    "output_tokens": 49777,
+    "api_call_count": 14
+  },
+  "started_at": "2026-10-30T19:09:25.5804589-04:00",
+  "completed_at": "2026-10-30T19:13:12.0528271-04:00"
+}

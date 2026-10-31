@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01BAyK92ozf3WmAdHHah2i3v",
+  "agent_id": "a019efa891cefa073",
+  "task_description": "Build benchmark harness",
+  "token_usage": {
+    "input_tokens": 44,
+    "cache_creation_tokens": 95919,
+    "cache_read_tokens": 2323566,
+    "output_tokens": 30656,
+    "api_call_count": 22
+  },
+  "started_at": "2026-10-30T19:16:28.9321984-04:00",
+  "completed_at": "2026-10-30T19:20:45.6476191-04:00"
+}
