@@ -213,7 +213,7 @@ pub const ColumnIndex = struct {
         for (self.max_values) |v| try writer.writeBinary(v);
 
         try writer.writeFieldHeader(4, .i32);
-        try writer.writeI32(@backingInt(self.boundary_order));
+        try writer.writeI32(@intFromEnum(self.boundary_order));
 
         if (self.null_counts) |counts| {
             try writer.writeFieldHeader(5, .list);
@@ -371,9 +371,9 @@ test "ColumnIndex round-trip with nulls" {
 }
 
 test "ColumnIndex boundary_order enum values" {
-    try testing.expectEqual(@as(i32, 0), @backingInt(BoundaryOrder.unordered));
-    try testing.expectEqual(@as(i32, 1), @backingInt(BoundaryOrder.ascending));
-    try testing.expectEqual(@as(i32, 2), @backingInt(BoundaryOrder.descending));
+    try testing.expectEqual(@as(i32, 0), @intFromEnum(BoundaryOrder.unordered));
+    try testing.expectEqual(@as(i32, 1), @intFromEnum(BoundaryOrder.ascending));
+    try testing.expectEqual(@as(i32, 2), @intFromEnum(BoundaryOrder.descending));
 }
 
 test "ColumnIndex accepts alternate bool encoding (0x00)" {

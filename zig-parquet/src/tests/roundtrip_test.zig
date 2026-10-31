@@ -2009,7 +2009,7 @@ test "round-trip DynamicReader reads INT32-backed decimal columns (low-level wri
     }
 
     {
-        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int32.parquet", allocator, @fromBackingInt(1024 * 1024));
+        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int32.parquet", allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(buf);
 
         var reader = try parquet.openBufferDynamic(allocator, buf, .{});
@@ -2050,7 +2050,7 @@ test "round-trip DynamicReader reads INT64-backed decimal columns (low-level wri
     }
 
     {
-        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int64.parquet", allocator, @fromBackingInt(1024 * 1024));
+        const buf = try tmp_dir.dir.readFileAlloc(io, "decimal_int64.parquet", allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(buf);
 
         var reader = try parquet.openBufferDynamic(allocator, buf, .{});

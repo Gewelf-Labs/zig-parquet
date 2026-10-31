@@ -614,7 +614,7 @@ fn serializeGeographyType(g: *const GeographyType, writer: *thrift.CompactWriter
     // Field 2: algorithm (optional enum)
     if (g.algorithm) |algo| {
         try writer.writeFieldHeader(2, .i32);
-        try writer.writeI32(@backingInt(algo));
+        try writer.writeI32(@intFromEnum(algo));
     }
 
     try writer.writeStructEnd();

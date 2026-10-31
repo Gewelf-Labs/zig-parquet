@@ -280,7 +280,7 @@ test "Reader.initFromBuffer reads real Parquet file" {
         io,
         "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
         allocator,
-        @fromBackingInt(10_000_000),
+        @enumFromInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -308,7 +308,7 @@ test "Reader.initFromBuffer matches file-based reading" {
     const file_path = "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet";
 
     // Read file into memory
-    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @fromBackingInt(10_000_000));
+    const file_data = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, @enumFromInt(10_000_000));
     defer allocator.free(file_data);
 
     // Initialize from buffer
@@ -358,7 +358,7 @@ test "DynamicReader.initFromBuffer reads real Parquet file" {
         io,
         "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
         allocator,
-        @fromBackingInt(10_000_000),
+        @enumFromInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -389,7 +389,7 @@ test "DynamicReader.initFromBuffer reads real Parquet file with row iteration" {
         io,
         "../test-files-arrow/basic/basic_types_plain_uncompressed.parquet",
         allocator,
-        @fromBackingInt(10_000_000),
+        @enumFromInt(10_000_000),
     );
     defer allocator.free(file_data);
 
@@ -416,7 +416,7 @@ test "Reader.initFromBuffer with compressed file" {
         io,
         "../test-files-arrow/compression/compression_zstd.parquet",
         allocator,
-        @fromBackingInt(10_000_000),
+        @enumFromInt(10_000_000),
     );
     defer allocator.free(file_data);
 

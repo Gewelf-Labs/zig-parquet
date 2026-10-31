@@ -105,11 +105,11 @@ pub const CompactWriter = struct {
 
         if (delta > 0 and delta <= 15) {
             // Delta fits in high nibble
-            const header: u8 = (@as(u8, safe.castTo(u8, delta) catch unreachable) << 4) | @backingInt(field_type); // delta is 1..15 from check above
+            const header: u8 = (@as(u8, safe.castTo(u8, delta) catch unreachable) << 4) | @intFromEnum(field_type); // delta is 1..15 from check above
             try self.writeByte(header);
         } else {
             // Write type nibble with 0 delta, then full field ID
-            try self.writeByte(@backingInt(field_type));
+            try self.writeByte(@intFromEnum(field_type));
             try self.writeI16(field_id);
         }
 
@@ -129,7 +129,7 @@ pub const CompactWriter = struct {
 
     /// Write a list header
     pub fn writeListHeader(self: *Self, element_type: Type, size: u32) !void {
-        const type_nibble: u8 = @backingInt(element_type);
+        const type_nibble: u8 = @intFromEnum(element_type);
         if (size < 15) {
             // Size fits in high nibble
             const header: u8 = (@as(u8, safe.castTo(u8, size) catch unreachable) << 4) | type_nibble; // size < 15 from check above

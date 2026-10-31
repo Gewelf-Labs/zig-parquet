@@ -79,12 +79,12 @@ pub const ColumnMetaData = struct {
         writer.resetFieldTracking();
 
         try writer.writeFieldHeader(1, .i32);
-        try writer.writeI32(@backingInt(self.type_));
+        try writer.writeI32(@intFromEnum(self.type_));
 
         try writer.writeFieldHeader(2, .list);
         try writer.writeListHeader(.i32, safe.castTo(u32, self.encodings.len) catch return error.IntegerOverflow);
         for (self.encodings) |enc| {
-            try writer.writeI32(@backingInt(enc));
+            try writer.writeI32(@intFromEnum(enc));
         }
 
         try writer.writeFieldHeader(3, .list);
@@ -94,7 +94,7 @@ pub const ColumnMetaData = struct {
         }
 
         try writer.writeFieldHeader(4, .i32);
-        try writer.writeI32(@backingInt(self.codec));
+        try writer.writeI32(@intFromEnum(self.codec));
 
         try writer.writeFieldHeader(5, .i64);
         try writer.writeI64(self.num_values);

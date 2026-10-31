@@ -192,8 +192,8 @@ pub const WkbGeometryBounder = struct {
         if (base_type < 1 or base_type > 7) return error.InvalidGeometryType;
         if (dim_code > 3) return error.InvalidDimensions;
 
-        const geometry_type: GeometryType = @fromBackingInt(safe.castTo(u8, base_type) catch return error.InvalidGeometryType);
-        const dims: Dimensions = @fromBackingInt(safe.castTo(u2, dim_code) catch return error.InvalidGeometryType);
+        const geometry_type: GeometryType = @enumFromInt(safe.castTo(u8, base_type) catch return error.InvalidGeometryType);
+        const dims: Dimensions = @enumFromInt(safe.castTo(u2, dim_code) catch return error.InvalidGeometryType);
 
         // Record geometry type at top level only (per Arrow convention)
         if (record_type) {
