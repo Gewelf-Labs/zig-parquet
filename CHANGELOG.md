@@ -44,6 +44,9 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - Out-of-memory leaks: footer parsers (`ColumnChunk`, `Statistics`, `RowGroup`, `SchemaElement`, `KeyValue`, `FileMetaData`) free partial allocations; nested assembly frees the partial list item and struct field; dynamic decoders free def/rep levels and page results.
 - FIXED_LEN_BYTE_ARRAY dictionary pages with BIT_PACKED levels longer than the page panicked; they now return `error.EndOfData`.
 - Repeated footer lists (schema, row groups, key/value metadata) leaked the earlier value; they are now freed before replacement.
+- `DynamicWriter` (and any `SchemaNode`-built schema) wrote `num_children = <struct field count>` on the repeated `list` group of a `list<struct>` column. Files with such a column followed by other columns failed to read back with `error.InvalidSchema`. The group now has one child, the `element` group.
+- GEOMETRY / GEOGRAPHY logical types leaked the `crs` string when parsing failed after it was read, or when the field repeated. `LogicalType.deinit` frees it.
+- Byte-array decoders initialized `Optional` slots in place from a fallible copy: on an allocation failure the slot already carried the `.value` tag with an undefined payload, and the cleanup path freed garbage (crashed on Linux). The copy is now made before the slot is written.
 
 ## [0.2.0] - 2026-04-07
 

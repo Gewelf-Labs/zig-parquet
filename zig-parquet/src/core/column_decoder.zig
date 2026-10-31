@@ -185,7 +185,10 @@ fn decodeColumnWithLevels(
     const result = try ctx.allocator.alloc(Optional(T), ctx.num_values);
     errdefer ctx.allocator.free(result);
     // Byte payloads copied before a failure are owned here: free them unless
-    // they are borrowed or live in the bytes arena.
+    // they are borrowed or live in the bytes arena. Producers must evaluate the
+    // `try` into a local before `result[i] = .{ .value = ... }`: initializing
+    // the union in place writes the tag before the payload, so a failed `try`
+    // would leave a `.value` slot holding undefined bytes for this errdefer.
     if (T == []const u8) @memset(result, .{ .null_value = {} });
     errdefer if (T == []const u8) {
         if (ownsBytes()) for (result) |o| switch (o) {
@@ -501,9 +504,11 @@ fn decodeDictStringsWithDefLevels(
             const dict_idx = indices[idx_pos];
             idx_pos += 1;
             if (ctx.string_dict.?.get(dict_idx)) |v| {
-                result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
+                const owned = try takeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
-                result[i] = .{ .value = try takeBytes(ctx.allocator, "") };
+                const owned = try takeBytes(ctx.allocator, "");
+                result[i] = .{ .value = owned };
             }
         } else {
             result[i] = .{ .null_value = {} };
@@ -687,7 +692,8 @@ fn decodeDictFixedByteArrayWithDefLevels(
             const dict_idx = indices[idx_pos];
             idx_pos += 1;
             if (ctx.fixed_byte_array_dict.?.get(dict_idx)) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try value_mod.dupeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
                 result[i] = .{ .null_value = {} };
             }
@@ -746,19 +752,22 @@ fn decodePlainWithDefLevels(
                     // Fixed-length byte array - no length prefix
                     if (data_offset + fixed_len > value_data.len) return error.EndOfData;
                     const value = value_data[data_offset..][0..fixed_len];
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, value) };
+                    const owned = try value_mod.dupeBytes(ctx.allocator, value);
+                    result[i] = .{ .value = owned };
                     data_offset += fixed_len;
                 } else if (isDecimalIntColumn(ctx)) {
                     // Decimal stored as INT32/INT64: read integer bytes, convert to big-endian
                     const int_size: usize = if (ctx.schema_elem.type_ == .int32) 4 else 8;
-                    result[i] = .{ .value = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size) };
+                    const owned = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size);
+                    result[i] = .{ .value = owned };
                     data_offset += int_size;
                 } else {
                     // Variable-length byte array - has 4-byte length prefix
                     if (data_offset + 4 > value_data.len) return error.EndOfData;
                     const ba = try plain.decodeByteArray(value_data[data_offset..]);
                     if (data_offset + ba.bytes_read > value_data.len) return error.EndOfData;
-                    result[i] = .{ .value = try takeBytes(ctx.allocator, ba.value) };
+                    const owned = try takeBytes(ctx.allocator, ba.value);
+                    result[i] = .{ .value = owned };
                     data_offset += ba.bytes_read;
                 }
             } else if (T == Int96) {
@@ -793,7 +802,8 @@ fn decodeRequiredColumn(
 
         for (0..ctx.num_values) |i| {
             if (ctx.fixed_byte_array_dict.?.get(indices[i])) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try value_mod.dupeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
                 result[i] = .{ .null_value = {} };
             }
@@ -809,9 +819,11 @@ fn decodeRequiredColumn(
 
         for (0..ctx.num_values) |i| {
             if (ctx.string_dict.?.get(indices[i])) |v| {
-                result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
+                const owned = try takeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
-                result[i] = .{ .value = try takeBytes(ctx.allocator, "") };
+                const owned = try takeBytes(ctx.allocator, "");
+                result[i] = .{ .value = owned };
             }
         }
     } else if (ctx.uses_dict and T == i32) {
@@ -874,7 +886,8 @@ fn decodeRequiredColumn(
         for (0..ctx.num_values) |i| {
             if (data_offset + fixed_len > value_data.len) return error.EndOfData;
             const value = value_data[data_offset..][0..fixed_len];
-            result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, value) };
+            const owned = try value_mod.dupeBytes(ctx.allocator, value);
+            result[i] = .{ .value = owned };
             data_offset += fixed_len;
         }
     } else if (T == f16 and is_fixed_len and fixed_len == 2) {
@@ -891,7 +904,8 @@ fn decodeRequiredColumn(
         const int_size: usize = if (ctx.schema_elem.type_ == .int32) 4 else 8;
         var data_offset: usize = 0;
         for (0..ctx.num_values) |i| {
-            result[i] = .{ .value = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size) };
+            const owned = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size);
+            result[i] = .{ .value = owned };
             data_offset += int_size;
         }
     } else {
@@ -901,7 +915,8 @@ fn decodeRequiredColumn(
             if (decoder.next()) |v| {
                 // For byte arrays, we need to dupe since value_data may be freed
                 if (T == []const u8) {
-                    result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
+                    const owned = try takeBytes(ctx.allocator, v);
+                    result[i] = .{ .value = owned };
                 } else {
                     result[i] = .{ .value = v };
                 }
@@ -1260,7 +1275,8 @@ fn decodeDeltaEncodedValuesV2(
             for (0..num_values) |i| {
                 if (def_mask[i]) {
                     if (decoded_idx < result.values.len) {
-                        values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, result.values[decoded_idx]) };
+                        const owned = try value_mod.dupeBytes(allocator, result.values[decoded_idx]);
+                        values[i] = .{ .bytes_val = owned };
                         decoded_idx += 1;
                     } else {
                         values[i] = .{ .null_val = {} };
@@ -1278,7 +1294,8 @@ fn decodeDeltaEncodedValuesV2(
             for (0..num_values) |i| {
                 if (def_mask[i]) {
                     if (decoded_idx < result.values.len) {
-                        values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, result.values[decoded_idx]) };
+                        const owned = try value_mod.dupeBytes(allocator, result.values[decoded_idx]);
+                        values[i] = .{ .bytes_val = owned };
                         decoded_idx += 1;
                     } else {
                         values[i] = .{ .null_val = {} };
@@ -1603,9 +1620,11 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 if (string_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .bytes_val = try takeBytes(allocator, v) };
+                    const owned = try takeBytes(allocator, v);
+                    values[i] = .{ .bytes_val = owned };
                 } else {
-                    values[i] = .{ .bytes_val = try takeBytes(allocator, "") };
+                    const owned = try takeBytes(allocator, "");
+                    values[i] = .{ .bytes_val = owned };
                 }
                 idx_pos += 1;
             } else {
@@ -1617,7 +1636,8 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 const ba = try plain.decodeByteArray(values_data[data_offset..]);
-                values[i] = .{ .bytes_val = try takeBytes(allocator, ba.value) };
+                const owned = try takeBytes(allocator, ba.value);
+                values[i] = .{ .bytes_val = owned };
                 data_offset += ba.bytes_read;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -1640,7 +1660,8 @@ fn decodeDynamicFixedByteArrayV2(allocator: std.mem.Allocator, schema_elem: form
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 if (fixed_byte_array_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    const owned = try value_mod.dupeBytes(allocator, v);
+                    values[i] = .{ .fixed_bytes_val = owned };
                 } else {
                     values[i] = .{ .null_val = {} };
                 }
@@ -1657,7 +1678,8 @@ fn decodeDynamicFixedByteArrayV2(allocator: std.mem.Allocator, schema_elem: form
             if (def_mask[i]) {
                 if (data_offset + fixed_len > values_data.len) return error.EndOfData;
                 const value = values_data[data_offset..][0..fixed_len];
-                values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, value) };
+                const owned = try value_mod.dupeBytes(allocator, value);
+                values[i] = .{ .fixed_bytes_val = owned };
                 data_offset += fixed_len;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -2382,7 +2404,8 @@ fn decodeDynamicFixedByteArray(
             const is_present = if (def_levels) |dl| dl[i] == max_def_level else true;
             if (is_present) {
                 if (fixed_byte_array_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    const owned = try value_mod.dupeBytes(allocator, v);
+                    values[i] = .{ .fixed_bytes_val = owned };
                 } else {
                     values[i] = .{ .null_val = {} };
                 }
@@ -2735,7 +2758,8 @@ fn decodeDeltaLengthByteArray(
     for (0..num_values) |i| {
         if (levels_info.def_mask[i]) {
             if (decoded_idx < decode_result.values.len) {
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]) };
+                const owned = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]);
+                values[i] = .{ .bytes_val = owned };
                 decoded_idx += 1;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -2795,7 +2819,8 @@ fn decodeDeltaByteArray(
     for (0..num_values) |i| {
         if (levels_info.def_mask[i]) {
             if (decoded_idx < decode_result.values.len) {
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]) };
+                const owned = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]);
+                values[i] = .{ .bytes_val = owned };
                 decoded_idx += 1;
             } else {
                 values[i] = .{ .null_val = {} };
