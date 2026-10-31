@@ -276,29 +276,12 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
         defer allocator.free(rle_data);
 
         // Optional columns always need definition levels, even when all values are non-null
-        const data_page_uncompressed = if (is_optional) blk: {
-            var page_def_levels = allocator.alloc(bool, page_values.len) catch return error.OutOfMemory;
-            defer allocator.free(page_def_levels);
-
-            for (page_values, 0..) |v, i| {
-                page_def_levels[i] = v != .null_value;
-            }
-
-            const def_level_data = rle_encoder.encodeDefLevelsWithLength(allocator, page_def_levels) catch return error.OutOfMemory;
-            defer allocator.free(def_level_data);
-
-            const page_data = allocator.alloc(u8, def_level_data.len + 1 + rle_data.len) catch return error.OutOfMemory;
-            @memcpy(page_data[0..def_level_data.len], def_level_data);
-            page_data[def_level_data.len] = bit_width;
-            @memcpy(page_data[def_level_data.len + 1 ..], rle_data);
-            break :blk page_data;
-        } else blk: {
-            const page_data = allocator.alloc(u8, 1 + rle_data.len) catch return error.OutOfMemory;
-            page_data[0] = bit_width;
-            @memcpy(page_data[1..], rle_data);
-            break :blk page_data;
-        };
-        defer allocator.free(data_page_uncompressed);
+        var page_buf: std.ArrayList(u8) = .empty;
+        defer page_buf.deinit(allocator);
+        if (is_optional) try rle_encoder.appendDefLevelsWithLength(T, &page_buf, allocator, page_values);
+        page_buf.append(allocator, bit_width) catch return error.OutOfMemory;
+        page_buf.appendSlice(allocator, rle_data) catch return error.OutOfMemory;
+        const data_page_uncompressed = page_buf.items;
 
         // Compress data page if needed
         const data_compressed: []const u8 = if (codec == .uncompressed)
@@ -537,29 +520,12 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         defer allocator.free(rle_data);
 
         // Optional columns always need definition levels, even when all values are non-null
-        const data_page_uncompressed = if (is_optional) blk: {
-            var page_def_levels = allocator.alloc(bool, page_values.len) catch return error.OutOfMemory;
-            defer allocator.free(page_def_levels);
-
-            for (page_values, 0..) |v, i| {
-                page_def_levels[i] = v != .null_value;
-            }
-
-            const def_level_data = rle_encoder.encodeDefLevelsWithLength(allocator, page_def_levels) catch return error.OutOfMemory;
-            defer allocator.free(def_level_data);
-
-            const page_data = allocator.alloc(u8, def_level_data.len + 1 + rle_data.len) catch return error.OutOfMemory;
-            @memcpy(page_data[0..def_level_data.len], def_level_data);
-            page_data[def_level_data.len] = bit_width;
-            @memcpy(page_data[def_level_data.len + 1 ..], rle_data);
-            break :blk page_data;
-        } else blk: {
-            const page_data = allocator.alloc(u8, 1 + rle_data.len) catch return error.OutOfMemory;
-            page_data[0] = bit_width;
-            @memcpy(page_data[1..], rle_data);
-            break :blk page_data;
-        };
-        defer allocator.free(data_page_uncompressed);
+        var page_buf: std.ArrayList(u8) = .empty;
+        defer page_buf.deinit(allocator);
+        if (is_optional) try rle_encoder.appendDefLevelsWithLength([]const u8, &page_buf, allocator, page_values);
+        page_buf.append(allocator, bit_width) catch return error.OutOfMemory;
+        page_buf.appendSlice(allocator, rle_data) catch return error.OutOfMemory;
+        const data_page_uncompressed = page_buf.items;
 
         // Compress data page if needed
         const data_compressed: []const u8 = if (codec == .uncompressed)
@@ -2808,6 +2774,71 @@ test "dictionary writers produce golden bytes" {
     try std.testing.expectEqual(@as(u64, 2422651048465132819), got_low);
     try std.testing.expectEqual(@as(u64, 16368603390927133427), got_distinct);
     try std.testing.expectEqual(@as(u64, 14272924328622877458), got_strs);
+}
+
+// Small dictionary_size_limit makes the dictionary writers fall back to PLAIN, so
+// their bytes must equal the PLAIN writers' bytes for the same input.
+test "dictionary writers fall back to PLAIN bytes under a small size limit" {
+    const allocator = std.testing.allocator;
+
+    var ints: [1000]Optional(i64) = undefined;
+    for (&ints, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i)) * 7919 };
+    var dict_i64: std.Io.Writer.Allocating = .init(allocator);
+    defer dict_i64.deinit();
+    var plain_i64: std.Io.Writer.Allocating = .init(allocator);
+    defer plain_i64.deinit();
+    var r1 = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &dict_i64.writer, &.{"c"}, &ints, true, 4, .uncompressed, 4000, null, null, false);
+    defer r1.deinit(allocator);
+    var r2 = try writeColumnChunkOptionalWithPathArray(i64, allocator, &plain_i64.writer, &.{"c"}, &ints, true, 4, .uncompressed, false);
+    defer r2.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, plain_i64.writer.buffered(), dict_i64.writer.buffered());
+
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = .{ .value = pool[i % 50] };
+    var dict_str: std.Io.Writer.Allocating = .init(allocator);
+    defer dict_str.deinit();
+    var plain_str: std.Io.Writer.Allocating = .init(allocator);
+    defer plain_str.deinit();
+    var r3 = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &dict_str.writer, &.{"c"}, &strs, true, 4, .uncompressed, 100, null, null, false);
+    defer r3.deinit(allocator);
+    var r4 = try writeColumnChunkByteArrayOptionalWithPathArray(allocator, &plain_str.writer, &.{"c"}, &strs, true, 4, .uncompressed, false);
+    defer r4.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, plain_str.writer.buffered(), dict_str.writer.buffered());
+}
+
+// Multi-page dictionary data (max_page_size 200 => 60 values per page), with nulls.
+// Hashes captured from the pre-change code; the one-buffer page build must keep them.
+test "dictionary writers multi-page golden bytes" {
+    const allocator = std.testing.allocator;
+
+    var ints: [1000]Optional(i64) = undefined;
+    for (&ints, 0..) |*slot, i| slot.* = if (i % 5 == 0) .null_value else .{ .value = @as(i64, @intCast(i % 300)) * 1000003 };
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = if (i % 7 == 0) .null_value else .{ .value = pool[i % 50] };
+
+    var aw1: std.Io.Writer.Allocating = .init(allocator);
+    defer aw1.deinit();
+    var r1 = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &aw1.writer, &.{"golden_col"}, &ints, true, 4, .uncompressed, 1_048_576, null, 200, false);
+    defer r1.deinit(allocator);
+    var aw2: std.Io.Writer.Allocating = .init(allocator);
+    defer aw2.deinit();
+    var r2 = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &aw2.writer, &.{"golden_col"}, &strs, true, 4, .uncompressed, 1_048_576, null, 200, false);
+    defer r2.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u64, 9278448097214148636), std.hash.Wyhash.hash(0, aw1.writer.buffered()));
+    try std.testing.expectEqual(@as(u64, 13697923572161511157), std.hash.Wyhash.hash(0, aw2.writer.buffered()));
 }
 
 fn goldenHashInt64(allocator: std.mem.Allocator, values: []const Optional(i64)) !u64 {
