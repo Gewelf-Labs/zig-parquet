@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01XCdCqsZUfgt3nf6SZEQ9tT",
+  "agent_id": "a66faeed814c3e623",
+  "task_description": "Haiku: format parser OOM leaks",
+  "token_usage": {
+    "input_tokens": 74,
+    "cache_creation_tokens": 128056,
+    "cache_read_tokens": 4798686,
+    "output_tokens": 51087,
+    "api_call_count": 37
+  },
+  "started_at": "2026-10-30T22:24:31.5757478-04:00",
+  "completed_at": "2026-10-30T22:39:36.520618-04:00"
+}
