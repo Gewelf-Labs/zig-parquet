@@ -2305,8 +2305,10 @@ fn decodeDynamicFixedByteArray(
             const rep_bit_width = format.computeBitWidth(max_rep_level);
             if (rep_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
+                const rep_bytes = try rle.bitPackedSize(num_values, rep_bit_width);
+                if (rep_bytes > value_data.len - pos) return error.EndOfData; // pos <= len: checked above
                 rep_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], rep_bit_width, num_values);
-                pos += try rle.bitPackedSize(num_values, rep_bit_width);
+                pos += rep_bytes;
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const rep_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
@@ -2326,8 +2328,10 @@ fn decodeDynamicFixedByteArray(
             const def_bit_width = format.computeBitWidth(max_def_level);
             if (def_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
+                const def_bytes = try rle.bitPackedSize(num_values, def_bit_width);
+                if (def_bytes > value_data.len - pos) return error.EndOfData; // pos <= len: checked above
                 def_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], def_bit_width, num_values);
-                pos += try rle.bitPackedSize(num_values, def_bit_width);
+                pos += def_bytes;
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const def_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
@@ -3044,6 +3048,19 @@ test "flat PLAIN fast path: OPTIONAL int64 with bit-packed def levels" {
     try std.testing.expect(r.values[1] == .null_val);
     try std.testing.expectEqual(@as(i64, -200), r.values[2].int64_val);
     try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
+}
+
+test "FLBA dictionary page: bit-packed levels longer than the page return EndOfData" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .fixed_len_byte_array, .type_length = 2, .repetition_type = .optional, .name = "f" };
+    var dict = try dictionary.FixedByteArrayDictionary.fromPlain(allocator, "ab", 1, 2);
+    defer dict.deinit();
+    // 16 values at 1 bit need 2 bytes of bit-packed def levels; the page has 1.
+    const page = [_]u8{0xff};
+    try std.testing.expectError(error.EndOfData, decodeDynamicFixedByteArray(allocator, elem, &page, 16, 1, 0, true, &dict, .bit_packed, .rle));
+    // Same for repetition levels.
+    const rep_elem = format.SchemaElement{ .type_ = .fixed_len_byte_array, .type_length = 2, .repetition_type = .repeated, .name = "f" };
+    try std.testing.expectError(error.EndOfData, decodeDynamicFixedByteArray(allocator, rep_elem, &page, 16, 1, 1, true, &dict, .bit_packed, .bit_packed));
 }
 
 fn decodeOptionalPagesForOom(allocator: std.mem.Allocator) !void {
