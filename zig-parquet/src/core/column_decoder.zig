@@ -2250,7 +2250,7 @@ fn decodeDynamicFixedByteArray(
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const rep_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
                 pos += 4;
-                if (pos + rep_len > value_data.len) return error.EndOfData;
+                if (rep_len > value_data.len - pos) return error.EndOfData; // pos <= len: checked by the 4-byte prefix test above; subtraction cannot overflow on 32-bit
                 rep_levels = try rle.decodeLevels(allocator, value_data[pos..][0..rep_len], rep_bit_width, num_values);
                 pos += rep_len;
             }
@@ -2271,7 +2271,7 @@ fn decodeDynamicFixedByteArray(
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const def_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
                 pos += 4;
-                if (pos + def_len > value_data.len) return error.EndOfData;
+                if (def_len > value_data.len - pos) return error.EndOfData; // pos <= len, as above
                 def_levels = try rle.decodeLevels(allocator, value_data[pos..][0..def_len], def_bit_width, num_values);
                 pos += def_len;
             }
