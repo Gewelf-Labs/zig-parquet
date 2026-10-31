@@ -319,7 +319,7 @@ fn decodeOptionalColumnWithLevels(
 
         if (ctx.rep_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const rep_bytes = rle.bitPackedSize(ctx.num_values, rep_bit_width);
+            const rep_bytes = try rle.bitPackedSize(ctx.num_values, rep_bit_width);
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_bytes);
             data_offset += rep_bytes;
             rep_levels_result = try rle.decodeBitPackedLevels(ctx.allocator, rep_levels_data, rep_bit_width, ctx.num_values);
@@ -339,7 +339,7 @@ fn decodeOptionalColumnWithLevels(
 
     if (ctx.def_level_encoding == .bit_packed) {
         // Pure bit-packed: no length prefix
-        const def_bytes = rle.bitPackedSize(ctx.num_values, def_bit_width);
+        const def_bytes = try rle.bitPackedSize(ctx.num_values, def_bit_width);
         const def_levels_data = try safe.slice(value_data, data_offset, def_bytes);
         data_offset += def_bytes;
         def_levels_raw = try rle.decodeBitPackedLevels(ctx.allocator, def_levels_data, def_bit_width, ctx.num_values);
@@ -1639,8 +1639,8 @@ fn decodeLevelsForDynamicWithEncoding(
 
         if (rep_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const rep_bytes = rle.bitPackedSize(num_values, rep_bit_width);
-            if (data_offset + rep_bytes > value_data.len) return error.EndOfData;
+            const rep_bytes = try rle.bitPackedSize(num_values, rep_bit_width);
+            if (rep_bytes > value_data.len - data_offset) return error.EndOfData; // data_offset <= len: every earlier advance was checked
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_bytes);
             data_offset += rep_bytes;
             rep_levels = try rle.decodeBitPackedLevels(allocator, rep_levels_data, rep_bit_width, num_values);
@@ -1649,7 +1649,8 @@ fn decodeLevelsForDynamicWithEncoding(
             if (data_offset + 4 > value_data.len) return error.EndOfData;
             const rep_levels_len = try plain.decodeU32(value_data[data_offset..]);
             data_offset += 4;
-            if (data_offset + rep_levels_len > value_data.len) return error.EndOfData;
+            // data_offset <= len here: the u32 prefix was checked and skipped above.
+            if (rep_levels_len > value_data.len - data_offset) return error.EndOfData;
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_levels_len);
             data_offset += rep_levels_len;
             rep_levels = try rle.decode(allocator, rep_levels_data, rep_bit_width, num_values);
@@ -1667,8 +1668,8 @@ fn decodeLevelsForDynamicWithEncoding(
 
         if (def_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const def_bytes = rle.bitPackedSize(num_values, def_bit_width);
-            if (data_offset + def_bytes > value_data.len) return error.EndOfData;
+            const def_bytes = try rle.bitPackedSize(num_values, def_bit_width);
+            if (def_bytes > value_data.len - data_offset) return error.EndOfData; // data_offset <= len: every earlier advance was checked
             const def_levels_data = try safe.slice(value_data, data_offset, def_bytes);
             data_offset += def_bytes;
             def_levels = try rle.decodeBitPackedLevels(allocator, def_levels_data, def_bit_width, num_values);
@@ -1677,7 +1678,8 @@ fn decodeLevelsForDynamicWithEncoding(
             if (data_offset + 4 > value_data.len) return error.EndOfData;
             const def_levels_len = try plain.decodeU32(value_data[data_offset..]);
             data_offset += 4;
-            if (data_offset + def_levels_len > value_data.len) return error.EndOfData;
+            // data_offset <= len here: the u32 prefix was checked and skipped above.
+            if (def_levels_len > value_data.len - data_offset) return error.EndOfData;
             const def_levels_data = try safe.slice(value_data, data_offset, def_levels_len);
             data_offset += def_levels_len;
             def_levels = try rle.decodeLevels(allocator, def_levels_data, def_bit_width, num_values);
@@ -1727,6 +1729,14 @@ fn decodeFlatPlainFixed(
         .int64, .double => 8,
         else => return null,
     };
+    if (max_def_level == 0) {
+        // REQUIRED: no level bytes and no mask, so the page is just the values.
+        const needed = std.math.mul(usize, num_values, width) catch return null;
+        if (value_data.len < needed) return null;
+        const values = try allocator.alloc(Value, num_values);
+        fillPlainFixed(physical_type, values, value_data, null);
+        return .{ .values = values, .def_levels = null, .rep_levels = null };
+    }
     const lv = decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, 0, def_level_encoding, rep_level_encoding) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
@@ -1744,20 +1754,26 @@ fn decodeFlatPlainFixed(
         if (lv.def_levels) |d| allocator.free(d);
         return e;
     };
-    switch (physical_type) {
-        .int32 => fillPlainFixed(i32, values, body, lv.def_mask),
-        .int64 => fillPlainFixed(i64, values, body, lv.def_mask),
-        .float => fillPlainFixed(f32, values, body, lv.def_mask),
-        .double => fillPlainFixed(f64, values, body, lv.def_mask),
-        else => unreachable, // filtered by the width switch above
-    }
+    fillPlainFixed(physical_type, values, body, lv.def_mask);
     return .{ .values = values, .def_levels = lv.def_levels, .rep_levels = null };
 }
 
-fn fillPlainFixed(comptime T: type, out: []Value, body: []const u8, def_mask: []const bool) void {
+fn fillPlainFixed(physical_type: format.PhysicalType, out: []Value, body: []const u8, def_mask: ?[]const bool) void {
+    switch (physical_type) {
+        .int32 => fillPlainFixedT(i32, out, body, def_mask),
+        .int64 => fillPlainFixedT(i64, out, body, def_mask),
+        .float => fillPlainFixedT(f32, out, body, def_mask),
+        .double => fillPlainFixedT(f64, out, body, def_mask),
+        else => unreachable, // filtered by the width switch in decodeFlatPlainFixed
+    }
+}
+
+/// `def_mask == null` means every value is present.
+fn fillPlainFixedT(comptime T: type, out: []Value, body: []const u8, def_mask: ?[]const bool) void {
     const Bits = if (@sizeOf(T) == 4) u32 else u64;
     var off: usize = 0;
-    for (def_mask, out) |present, *v| {
+    for (out, 0..) |*v, i| {
+        const present = if (def_mask) |m| m[i] else true;
         if (!present) {
             v.* = .{ .null_val = {} };
             continue;
@@ -1769,7 +1785,7 @@ fn fillPlainFixed(comptime T: type, out: []Value, body: []const u8, def_mask: []
             i64 => .{ .int64_val = x },
             f32 => .{ .float_val = x },
             f64 => .{ .double_val = x },
-            else => @compileError("fillPlainFixed: unsupported " ++ @typeName(T)),
+            else => @compileError("fillPlainFixedT: unsupported " ++ @typeName(T)),
         };
         off += @sizeOf(T);
     }
@@ -2229,7 +2245,7 @@ fn decodeDynamicFixedByteArray(
             if (rep_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
                 rep_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], rep_bit_width, num_values);
-                pos += rle.bitPackedSize(num_values, rep_bit_width);
+                pos += try rle.bitPackedSize(num_values, rep_bit_width);
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const rep_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
@@ -2250,7 +2266,7 @@ fn decodeDynamicFixedByteArray(
             if (def_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
                 def_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], def_bit_width, num_values);
-                pos += rle.bitPackedSize(num_values, def_bit_width);
+                pos += try rle.bitPackedSize(num_values, def_bit_width);
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const def_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
@@ -2936,4 +2952,34 @@ test "flat PLAIN fast path: short OPTIONAL int32 returns EndOfData" {
     data[5] = 0x07; // levels 1,1,1 -> 3 non-null values expected
     std.mem.writeInt(i32, data[6..10], 1, .little); // only one value present
     try std.testing.expectError(error.EndOfData, decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain));
+}
+
+test "flat PLAIN fast path: REQUIRED int32 values" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .required, .name = "i" };
+    var data: [12]u8 = undefined;
+    std.mem.writeInt(i32, data[0..4], 7, .little);
+    std.mem.writeInt(i32, data[4..8], -8, .little);
+    std.mem.writeInt(i32, data[8..12], 9, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i32, 7), r.values[0].int32_val);
+    try std.testing.expectEqual(@as(i32, -8), r.values[1].int32_val);
+    try std.testing.expectEqual(@as(i32, 9), r.values[2].int32_val);
+    try std.testing.expect(r.def_levels == null);
+}
+
+test "flat PLAIN fast path: OPTIONAL int64 with bit-packed def levels" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .optional, .name = "x" };
+    var data: [17]u8 = undefined;
+    data[0] = 0x05; // bit-packed levels 1,0,1 at 1 bit each, LSB first, no length prefix
+    std.mem.writeInt(i64, data[1..9], 100, .little);
+    std.mem.writeInt(i64, data[9..17], -200, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .bit_packed, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 100), r.values[0].int64_val);
+    try std.testing.expect(r.values[1] == .null_val);
+    try std.testing.expectEqual(@as(i64, -200), r.values[2].int64_val);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
 }

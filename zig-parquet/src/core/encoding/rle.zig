@@ -111,8 +111,9 @@ pub fn decodeBitPackedLevels(allocator: std.mem.Allocator, data: []const u8, bit
 }
 
 /// Calculate the byte size needed for bit-packed levels
-pub fn bitPackedSize(num_values: usize, bit_width: u5) usize {
-    return (num_values * bit_width + 7) / 8;
+pub fn bitPackedSize(num_values: usize, bit_width: u5) error{Overflow}!usize {
+    const bits = std.math.mul(usize, num_values, bit_width) catch return error.Overflow;
+    return bits / 8 + @intFromBool(bits % 8 != 0);
 }
 
 const VarIntResult = struct {
@@ -315,4 +316,10 @@ test "RLE decode truncated bit-packed run zero-fills" {
     defer allocator.free(result2);
     const expected2 = [_]u32{ 1, 2, 3, 4, 0, 0, 0, 0 };
     try std.testing.expectEqualSlices(u32, &expected2, result2);
+}
+
+test "bitPackedSize rounds up and rejects overflow" {
+    try std.testing.expectEqual(@as(usize, 2), try bitPackedSize(3, 5)); // 15 bits -> 2 bytes
+    try std.testing.expectEqual(@as(usize, 0), try bitPackedSize(0, 7));
+    try std.testing.expectError(error.Overflow, bitPackedSize(std.math.maxInt(usize), 31));
 }
