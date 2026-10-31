@@ -135,12 +135,6 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
         return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
     }
 
-    // Compute statistics using unified API
-    var stats_builder = statistics.StatisticsBuilder(T){};
-    stats_builder.updateOptional(values);
-    var stats = stats_builder.build(allocator) catch return error.OutOfMemory;
-    errdefer if (stats) |s| freeStatistics(allocator, s);
-
     // Build dictionary from non-null values
     var unique_map = std.HashMap(T, u32, DictHashContext(T), std.hash_map.default_max_load_percentage).init(allocator);
     defer unique_map.deinit();
@@ -158,24 +152,25 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
     var idx: usize = 0;
     for (values) |v| {
         if (v != .null_value) {
-            const val = v.value;
-            if (unique_map.get(val)) |dict_idx| {
-                indices[idx] = dict_idx;
-            } else {
-                const new_idx: u32 = try safe.castTo(u32, dict_values.items.len);
-                unique_map.put(val, new_idx) catch return error.OutOfMemory;
-                dict_values.append(allocator, val) catch return error.OutOfMemory;
-                indices[idx] = new_idx;
+            const gop = unique_map.getOrPut(v.value) catch return error.OutOfMemory;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try safe.castTo(u32, dict_values.items.len);
+                dict_values.append(allocator, v.value) catch return error.OutOfMemory;
+                // The dictionary only grows, so its first excess is the same decision
+                // the old post-loop check made: fall back now instead of hashing on.
+                if (dictionary_size_limit) |limit| {
+                    if (dict_values.items.len * @sizeOf(T) > limit) {
+                        return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
+                    }
+                }
             }
+            indices[idx] = gop.value_ptr.*;
             idx += 1;
 
-            // Check cardinality threshold early abort
-            if (dictionary_cardinality_threshold) |threshold| {
+            if (dictionary_cardinality_threshold) |cardinality_limit| {
                 if (idx >= 1024) {
                     const ratio = @as(f32, @floatFromInt(dict_values.items.len)) / @as(f32, @floatFromInt(idx));
-                    if (ratio > threshold) {
-                        if (stats) |s| freeStatistics(allocator, s);
-                        stats = null;
+                    if (ratio > cardinality_limit) {
                         return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
                     }
                 }
@@ -185,15 +180,11 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
 
     const dict_size = dict_values.items.len;
 
-    // Check dictionary size limit
-    const dict_bytes = dict_size * @sizeOf(T);
-    if (dictionary_size_limit) |limit| {
-        if (dict_bytes > limit) {
-            if (stats) |s| freeStatistics(allocator, s);
-            stats = null;
-            return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
-        }
-    }
+    // Statistics are only needed once the dictionary is kept (fallbacks compute their own).
+    var stats_builder = statistics.StatisticsBuilder(T){};
+    stats_builder.updateOptional(values);
+    const stats = stats_builder.build(allocator) catch return error.OutOfMemory;
+    errdefer if (stats) |s| freeStatistics(allocator, s);
 
     // Write dictionary page (PLAIN encoded)
     const bytes_per_value = @sizeOf(T);
@@ -405,12 +396,6 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
     }
 
-    // Compute statistics using unified API
-    var stats_builder = statistics.ByteArrayStatisticsBuilder.init(allocator);
-    stats_builder.updateOptional(values) catch return error.OutOfMemory;
-    var stats = stats_builder.build();
-    errdefer if (stats) |s| freeStatistics(allocator, s);
-
     // Build dictionary from non-null values
     var unique_map = std.StringHashMap(u32).init(allocator);
     defer unique_map.deinit();
@@ -431,23 +416,26 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         if (v != .null_value) {
             const val = v.value;
             if (val.len > std.math.maxInt(i32)) return error.ValueTooLarge;
-            if (unique_map.get(val)) |dict_idx| {
-                indices[idx] = dict_idx;
-            } else {
-                const new_idx: u32 = try safe.castTo(u32, dict_values.items.len);
-                unique_map.put(val, new_idx) catch return error.OutOfMemory;
+            const gop = unique_map.getOrPut(val) catch return error.OutOfMemory;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try safe.castTo(u32, dict_values.items.len);
                 dict_values.append(allocator, val) catch return error.OutOfMemory;
                 dict_bytes += 4 + val.len;
-                indices[idx] = new_idx;
+                // The dictionary only grows, so its first excess is the same decision
+                // the old post-loop check made: fall back now instead of hashing on.
+                if (dictionary_size_limit) |limit| {
+                    if (dict_bytes > limit) {
+                        return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
+                    }
+                }
             }
+            indices[idx] = gop.value_ptr.*;
             idx += 1;
 
-            if (dictionary_cardinality_threshold) |threshold| {
+            if (dictionary_cardinality_threshold) |cardinality_limit| {
                 if (idx >= 1024) {
                     const ratio = @as(f32, @floatFromInt(dict_values.items.len)) / @as(f32, @floatFromInt(idx));
-                    if (ratio > threshold) {
-                        if (stats) |s| freeStatistics(allocator, s);
-                        stats = null;
+                    if (ratio > cardinality_limit) {
                         return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
                     }
                 }
@@ -457,14 +445,12 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
 
     const dict_size = dict_values.items.len;
 
-    // Check dictionary size limit
-    if (dictionary_size_limit) |limit| {
-        if (dict_bytes > limit) {
-            if (stats) |s| freeStatistics(allocator, s);
-            stats = null;
-            return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
-        }
-    }
+    // Statistics are only needed once the dictionary is kept (fallbacks compute their own).
+    var stats_builder = statistics.ByteArrayStatisticsBuilder.init(allocator);
+    defer stats_builder.deinit();
+    stats_builder.updateOptional(values) catch return error.OutOfMemory;
+    const stats = stats_builder.build();
+    errdefer if (stats) |s| freeStatistics(allocator, s);
 
     // Write dictionary page (length-prefixed byte arrays)
     const dict_data = allocator.alloc(u8, dict_bytes) catch return error.OutOfMemory;
@@ -2795,4 +2781,47 @@ test "compressed column tracks uncompressed vs compressed sizes separately" {
     // With compression, uncompressed and compressed sizes should differ
     // (for small data snappy may expand, but the sizes must still be tracked independently)
     try std.testing.expect(result.metadata.total_uncompressed_size != result.metadata.total_compressed_size);
+}
+
+// Byte-identity golden for the dictionary writers. Hashes were captured from the
+// pre-refactor code; any change to the bytes these columns produce fails here.
+test "dictionary writers produce golden bytes" {
+    const allocator = std.testing.allocator;
+
+    var ints_low: [1000]Optional(i64) = undefined;
+    for (&ints_low, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i % 10)) * 1000003 };
+    var ints_distinct: [1000]Optional(i64) = undefined;
+    for (&ints_distinct, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i)) * 7919 };
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = .{ .value = pool[i % 50] };
+
+    const got_low = try goldenHashInt64(allocator, &ints_low);
+    const got_distinct = try goldenHashInt64(allocator, &ints_distinct);
+    const got_strs = try goldenHashBytes(allocator, &strs);
+
+    try std.testing.expectEqual(@as(u64, 2422651048465132819), got_low);
+    try std.testing.expectEqual(@as(u64, 16368603390927133427), got_distinct);
+    try std.testing.expectEqual(@as(u64, 14272924328622877458), got_strs);
+}
+
+fn goldenHashInt64(allocator: std.mem.Allocator, values: []const Optional(i64)) !u64 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var result = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &aw.writer, &.{"golden_col"}, values, true, 4, .uncompressed, 1_048_576, null, null, false);
+    defer result.deinit(allocator);
+    return std.hash.Wyhash.hash(0, aw.writer.buffered());
+}
+
+fn goldenHashBytes(allocator: std.mem.Allocator, values: []const Optional([]const u8)) !u64 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var result = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &aw.writer, &.{"golden_col"}, values, true, 4, .uncompressed, 1_048_576, null, null, false);
+    defer result.deinit(allocator);
+    return std.hash.Wyhash.hash(0, aw.writer.buffered());
 }
