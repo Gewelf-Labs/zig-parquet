@@ -24,6 +24,30 @@ pub const Optional = types.Optional;
 pub const Int96 = types.Int96;
 pub const Value = value_mod.Value;
 
+/// Byte ownership for variable-length BYTE_ARRAY values decoded from PLAIN and
+/// dictionary pages (V1 and V2; not FIXED_LEN_BYTE_ARRAY, decimals or delta
+/// encodings, which always copy).
+///
+/// - `false` (default): each `bytes_val` is a fresh copy made by
+///   `value_mod.dupeBytes`, so it outlives `value_data` and the dictionary.
+/// - `true`: each `bytes_val` is a slice of `value_data` or of the dictionary's
+///   entries (which must then be slices of the dictionary page buffer). The
+///   caller must keep those buffers alive for as long as the values, and must
+///   never free the slices individually. `DynamicReader` sets this only while
+///   `value_mod.bytes_arena_allocator` is set and the page buffers were
+///   allocated from that arena, so borrowed slices live exactly as long as
+///   arena copies would have and `Value.deinit` already skips them.
+///
+/// Every borrowed slice comes from a length-checked decode (`plain.decodeByteArray`
+/// / `PlainDecoder`), the same bounds the copying path relies on.
+pub threadlocal var borrow_bytes: bool = false;
+
+/// Copy `bytes` (or return them as-is when `borrow_bytes` is set).
+inline fn takeBytes(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (borrow_bytes) return bytes;
+    return value_mod.dupeBytes(allocator, bytes);
+}
+
 /// Extract and validate bit_width from dictionary-encoded data.
 /// Bit width must be 0-31 to fit in u5 for RLE decoding.
 fn extractBitWidth(data: []const u8, offset: usize) error{ InvalidBitWidth, EndOfData }!u5 {
@@ -441,9 +465,9 @@ fn decodeDictStringsWithDefLevels(
             const dict_idx = indices[idx_pos];
             idx_pos += 1;
             if (ctx.string_dict.?.get(dict_idx)) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
             } else {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, "") };
+                result[i] = .{ .value = try takeBytes(ctx.allocator, "") };
             }
         } else {
             result[i] = .{ .null_value = {} };
@@ -698,7 +722,7 @@ fn decodePlainWithDefLevels(
                     if (data_offset + 4 > value_data.len) return error.EndOfData;
                     const ba = try plain.decodeByteArray(value_data[data_offset..]);
                     if (data_offset + ba.bytes_read > value_data.len) return error.EndOfData;
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, ba.value) };
+                    result[i] = .{ .value = try takeBytes(ctx.allocator, ba.value) };
                     data_offset += ba.bytes_read;
                 }
             } else if (T == Int96) {
@@ -749,9 +773,9 @@ fn decodeRequiredColumn(
 
         for (0..ctx.num_values) |i| {
             if (ctx.string_dict.?.get(indices[i])) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
             } else {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, "") };
+                result[i] = .{ .value = try takeBytes(ctx.allocator, "") };
             }
         }
     } else if (ctx.uses_dict and T == i32) {
@@ -841,7 +865,7 @@ fn decodeRequiredColumn(
             if (decoder.next()) |v| {
                 // For byte arrays, we need to dupe since value_data may be freed
                 if (T == []const u8) {
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                    result[i] = .{ .value = try takeBytes(ctx.allocator, v) };
                 } else {
                     result[i] = .{ .value = v };
                 }
@@ -1543,9 +1567,9 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 if (string_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    values[i] = .{ .bytes_val = try takeBytes(allocator, v) };
                 } else {
-                    values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, "") };
+                    values[i] = .{ .bytes_val = try takeBytes(allocator, "") };
                 }
                 idx_pos += 1;
             } else {
@@ -1557,7 +1581,7 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 const ba = try plain.decodeByteArray(values_data[data_offset..]);
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, ba.value) };
+                values[i] = .{ .bytes_val = try takeBytes(allocator, ba.value) };
                 data_offset += ba.bytes_read;
             } else {
                 values[i] = .{ .null_val = {} };

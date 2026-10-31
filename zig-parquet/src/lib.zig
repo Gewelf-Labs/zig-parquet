@@ -121,6 +121,7 @@ pub const DynamicReaderError = reader_module.DynamicReaderError;
 pub const DynamicReaderOptions = reader_module.DynamicReaderOptions;
 pub const ChecksumOptions = reader_module.ChecksumOptions;
 pub const RowIterator = DynamicReader.RowIterator;
+pub const StreamingRowIterator = DynamicReader.StreamingRowIterator;
 pub const Row = value.Row;
 
 // Page-index filtering (read-time skip of pages whose min/max can't match).

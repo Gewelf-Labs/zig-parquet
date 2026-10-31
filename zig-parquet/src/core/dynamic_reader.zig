@@ -875,12 +875,33 @@ pub const DynamicReader = struct {
         const chunk = &rg.columns[column_index];
         const meta = chunk.meta_data orelse return error.InvalidArgument;
 
-        // Read the raw page data (or use caller's buffer).
-        const owned_page_data: ?[]u8 = if (override_page_data == null)
-            try self.readColumnChunkData(chunk)
+        // Zero-copy BYTE_ARRAY values (see `column_decoder.borrow_bytes`): when
+        // byte payloads go to a bytes arena and this function owns the page
+        // buffers, those buffers are allocated from that arena and decoded values
+        // point into them. They then live exactly as long as arena copies would
+        // have (until the arena's reset/deinit); nothing frees them per value.
+        const borrow_arena: ?std.mem.Allocator = if (override_page_data == null and
+            if (format.getColumnInfo(self.metadata.schema, column_index)) |ci| ci.element.type_ == .byte_array else false)
+            value_mod.bytes_arena_allocator
         else
             null;
-        defer if (owned_page_data) |pd| self.allocator.free(pd);
+        const prev_borrow = column_decoder.borrow_bytes;
+        column_decoder.borrow_bytes = borrow_arena != null;
+        defer column_decoder.borrow_bytes = prev_borrow;
+        // Page buffers (decompressed pages, or the whole chunk when uncompressed)
+        // go to the arena when borrowing and are then never freed here: an arena
+        // free of its last allocation would hand the bytes to the next page.
+        const page_alloc = borrow_arena orelse self.allocator;
+        const free_pages = borrow_arena == null;
+        const chunk_alloc = if (meta.codec == .uncompressed) page_alloc else self.allocator;
+        const free_chunk = free_pages or meta.codec != .uncompressed;
+
+        // Read the raw page data (or use caller's buffer).
+        const owned_page_data: ?[]u8 = if (override_page_data == null)
+            try self.readColumnChunkData(chunk_alloc, chunk)
+        else
+            null;
+        defer if (owned_page_data) |pd| if (free_chunk) chunk_alloc.free(pd);
         const page_data: []const u8 = owned_page_data orelse override_page_data.?;
 
         var pos: usize = 0;
@@ -934,9 +955,9 @@ pub const DynamicReader = struct {
 
                 // Decompress dictionary page if needed
                 const dict_data = if (meta.codec != .uncompressed) blk: {
-                    break :blk try self.decompressData(dict_compressed, meta.codec, dict_uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, dict_compressed, meta.codec, dict_uncompressed_size);
                 } else dict_compressed;
-                defer if (meta.codec != .uncompressed) self.allocator.free(dict_data);
+                defer if (meta.codec != .uncompressed and free_pages) self.allocator.free(dict_data);
 
                 // Build dictionaries based on physical type
                 const column_info_for_dict = format.getColumnInfo(self.metadata.schema, column_index);
@@ -944,7 +965,10 @@ pub const DynamicReader = struct {
                     if (info.element.type_) |phys_type| {
                         switch (phys_type) {
                             .byte_array => {
-                                string_dict = try dictionary.StringDictionary.fromPlain(self.allocator, dict_data, dict_num_values);
+                                string_dict = if (borrow_arena != null)
+                                    try dictionary.StringDictionary.fromPlainBorrowed(self.allocator, dict_data, dict_num_values)
+                                else
+                                    try dictionary.StringDictionary.fromPlain(self.allocator, dict_data, dict_num_values);
                             },
                             .int32 => {
                                 int32_dict = try dictionary.Int32Dictionary.fromPlain(self.allocator, dict_data, dict_num_values);
@@ -1058,9 +1082,9 @@ pub const DynamicReader = struct {
                         break :blk values_compressed; // Return empty slice, no decompression needed
                     }
                     values_data_allocated = true;
-                    break :blk try self.decompressData(values_compressed, meta.codec, values_uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, values_compressed, meta.codec, values_uncompressed_size);
                 } else values_compressed;
-                defer if (values_data_allocated) self.allocator.free(values_data);
+                defer if (values_data_allocated and free_pages) self.allocator.free(values_data);
 
                 // Get value encoding from page header (used for delta encodings)
                 const value_encoding = v2.encoding;
@@ -1115,9 +1139,9 @@ pub const DynamicReader = struct {
                 // Decompress entire page if needed
                 const value_data = if (meta.codec != .uncompressed) blk: {
                     const uncompressed_size = try safePageSize(page_header.uncompressed_page_size);
-                    break :blk try self.decompressData(compressed_body, meta.codec, uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, compressed_body, meta.codec, uncompressed_size);
                 } else compressed_body;
-                defer if (meta.codec != .uncompressed) self.allocator.free(value_data);
+                defer if (meta.codec != .uncompressed and free_pages) self.allocator.free(value_data);
 
                 const num_values = try safePageSize(dph.num_values);
                 if (num_values == 0) continue;
@@ -1347,8 +1371,8 @@ pub const DynamicReader = struct {
     }
 
     /// Read raw page data for a column chunk
-    fn readColumnChunkData(self: *Self, chunk: *const format.ColumnChunk) ![]u8 {
-        return parquet_reader.readColumnChunkData(self.allocator, self.getSource(), chunk) catch |e| {
+    fn readColumnChunkData(self: *Self, allocator: std.mem.Allocator, chunk: *const format.ColumnChunk) ![]u8 {
+        return parquet_reader.readColumnChunkData(allocator, self.getSource(), chunk) catch |e| {
             return switch (e) {
                 error.InvalidArgument => error.InvalidArgument,
                 error.OutOfMemory => error.OutOfMemory,
@@ -1359,8 +1383,9 @@ pub const DynamicReader = struct {
     }
 
     /// Decompress page data
-    fn decompressData(self: *Self, compressed: []const u8, codec: format.CompressionCodec, uncompressed_size: usize) ![]u8 {
-        return compress.decompress(self.allocator, compressed, codec, uncompressed_size) catch |err| switch (err) {
+    fn decompressData(self: *Self, allocator: std.mem.Allocator, compressed: []const u8, codec: format.CompressionCodec, uncompressed_size: usize) ![]u8 {
+        _ = self;
+        return compress.decompress(allocator, compressed, codec, uncompressed_size) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.DecompressionError => return error.DecompressionError,
             error.UnsupportedCompression => return error.UnsupportedCompression,

@@ -4547,3 +4547,130 @@ test "round-trip all-null optional UUID column with dictionary encoding (Dynamic
     try std.testing.expect(rows[1].getColumn(0).?.isNull());
     try std.testing.expect(rows[2].getColumn(0).?.isNull());
 }
+
+// Zero-copy BYTE_ARRAY reads: string values point into page buffers held by the
+// reader's (or streaming iterator's) bytes arena. These tests pin the lifetimes.
+
+/// Row `i` of the zero-copy fixtures: null every 7th row, else a string that
+/// repeats every 4 rows (dictionary) or is unique.
+fn zcExpected(buf: *[32]u8, i: usize, repeat: bool) ?[]const u8 {
+    if (i % 7 == 3) return null;
+    return if (repeat)
+        std.fmt.bufPrint(buf, "repeated-value-{d}", .{i % 4}) catch unreachable // fits in 32 bytes
+    else
+        std.fmt.bufPrint(buf, "unique-value-{d}", .{i}) catch unreachable; // fits in 32 bytes
+}
+
+/// 25 rows of one optional string column in 3 row groups.
+fn writeZcStrings(allocator: std.mem.Allocator, use_dict: bool, codec: parquet.format.CompressionCodec) ![]u8 {
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+
+    try writer.addColumn("s", TypeInfo.string, .{});
+    writer.setUseDictionary(use_dict);
+    writer.setCompression(codec);
+    writer.setRowGroupSize(10);
+    try writer.begin();
+
+    var buf: [32]u8 = undefined;
+    for (0..25) |i| {
+        if (zcExpected(&buf, i, use_dict)) |s| try writer.setBytes(0, s) else try writer.setNull(0);
+        try writer.addRow();
+    }
+    try writer.close();
+    return writer.toOwnedSlice();
+}
+
+fn expectZcEncoding(reader: *parquet.DynamicReader, use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    try std.testing.expectEqual(@as(usize, 3), reader.getNumRowGroups());
+    const meta = reader.metadata.row_groups[0].columns[0].meta_data.?;
+    try std.testing.expectEqual(codec, meta.codec);
+    const has_dict = std.mem.indexOfScalar(parquet.format.Encoding, meta.encodings, .rle_dictionary) != null;
+    try std.testing.expectEqual(use_dict, has_dict);
+}
+
+/// Streaming read; each row is checked when `next()` returns it (the contract).
+fn checkZcStreaming(use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, use_dict, codec);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try expectZcEncoding(&reader, use_dict, codec);
+
+    var iter: parquet.StreamingRowIterator = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var buf: [32]u8 = undefined;
+    // Pointer of row 0's dictionary value; rows 4 and 8 (same row group, same
+    // dictionary entry) must share it when values borrow the dictionary page.
+    var first_ptr: ?[*]const u8 = null;
+    while (try iter.next()) |row| {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, count, use_dict)) |s| {
+            try std.testing.expectEqualStrings(s, v.asBytes().?);
+            if (use_dict and count == 0) first_ptr = v.asBytes().?.ptr;
+            if (use_dict and (count == 4 or count == 8)) try std.testing.expectEqual(first_ptr.?, v.asBytes().?.ptr);
+        } else {
+            try std.testing.expect(v.isNull());
+        }
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
+/// readAllRows of every row group, checked only after all of them were read:
+/// bytes must survive the reader moving on to later row groups.
+fn checkZcReadAll(use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, use_dict, codec);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try expectZcEncoding(&reader, use_dict, codec);
+
+    var groups: [3][]DynRow = undefined;
+    for (&groups, 0..) |*g, rg| g.* = try reader.readAllRows(rg);
+    defer for (groups) |g| {
+        for (g) |row| row.deinit();
+        allocator.free(g);
+    };
+
+    var i: usize = 0;
+    var buf: [32]u8 = undefined;
+    for (groups) |g| for (g) |row| {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, i, use_dict)) |s| {
+            try std.testing.expectEqualStrings(s, v.asBytes().?);
+        } else {
+            try std.testing.expect(v.isNull());
+        }
+        i += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 25), i);
+}
+
+test "zero-copy strings: streaming PLAIN across row groups" {
+    try checkZcStreaming(false, .uncompressed);
+}
+
+test "zero-copy strings: streaming dictionary across row groups" {
+    try checkZcStreaming(true, .uncompressed);
+}
+
+test "zero-copy strings: streaming compressed pages" {
+    if (!build_options.supports_zstd) return;
+    try checkZcStreaming(false, .zstd);
+    try checkZcStreaming(true, .zstd);
+}
+
+test "zero-copy strings: readAllRows bytes survive later row groups" {
+    try checkZcReadAll(false, .uncompressed);
+    try checkZcReadAll(true, .uncompressed);
+    if (!build_options.supports_zstd) return;
+    try checkZcReadAll(false, .zstd);
+    try checkZcReadAll(true, .zstd);
+}
