@@ -48,6 +48,28 @@ inline fn takeBytes(allocator: std.mem.Allocator, bytes: []const u8) std.mem.All
     return value_mod.dupeBytes(allocator, bytes);
 }
 
+/// True when decoded byte payloads are individual allocations that the decoder
+/// must free on failure (not borrowed, not in the bytes arena).
+fn ownsBytes() bool {
+    return !borrow_bytes and value_mod.bytes_arena_allocator == null;
+}
+
+/// Free a typed decode result's levels (after a later step failed).
+fn freeLevels(allocator: std.mem.Allocator, def_levels: ?[]u32, rep_levels: ?[]u32) void {
+    if (def_levels) |dl| allocator.free(dl);
+    if (rep_levels) |rl| allocator.free(rl);
+}
+
+/// Free a typed byte-array decode result (after a later step failed).
+fn discardBytesResult(allocator: std.mem.Allocator, r: DecodeResult([]const u8)) void {
+    if (ownsBytes()) for (r.values) |o| switch (o) {
+        .value => |b| allocator.free(b),
+        .null_value => {},
+    };
+    allocator.free(r.values);
+    freeLevels(allocator, r.def_levels, r.rep_levels);
+}
+
 /// Extract and validate bit_width from dictionary-encoded data.
 /// Bit width must be 0-31 to fit in u5 for RLE decoding.
 fn extractBitWidth(data: []const u8, offset: usize) error{ InvalidBitWidth, EndOfData }!u5 {
@@ -157,6 +179,15 @@ fn decodeColumnWithLevels(
 
     const result = try ctx.allocator.alloc(Optional(T), ctx.num_values);
     errdefer ctx.allocator.free(result);
+    // Byte payloads copied before a failure are owned here: free them unless
+    // they are borrowed or live in the bytes arena.
+    if (T == []const u8) @memset(result, .{ .null_value = {} });
+    errdefer if (T == []const u8) {
+        if (ownsBytes()) for (result) |o| switch (o) {
+            .value => |b| ctx.allocator.free(b),
+            .null_value => {},
+        };
+    };
 
     var def_levels: ?[]u32 = null;
     var rep_levels: ?[]u32 = null;
@@ -1839,6 +1870,7 @@ fn decodeDynamicBool(
 
     const typed_result = try decodeColumnWithLevels(bool, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     // Convert to Value
     const values = try allocator.alloc(Value, num_values);
@@ -1942,6 +1974,7 @@ fn decodeDynamicInt32(
 
     const typed_result = try decodeColumnWithLevels(i32, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -1985,6 +2018,7 @@ fn decodeDynamicInt64(
 
     const typed_result = try decodeColumnWithLevels(i64, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -2032,6 +2066,7 @@ fn decodeDynamicFloat(
 
     const typed_result = try decodeColumnWithLevels(f32, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -2079,6 +2114,7 @@ fn decodeDynamicDouble(
 
     const typed_result = try decodeColumnWithLevels(f64, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -2223,6 +2259,7 @@ fn decodeDynamicByteArray(
 
     const typed_result = try decodeColumnWithLevels([]const u8, ctx, value_data);
     // Don't defer free - we're transferring ownership of the byte arrays
+    errdefer discardBytesResult(allocator, typed_result);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2367,6 +2404,7 @@ fn decodeDynamicFixedByteArray(
     };
 
     const typed_result = try decodeColumnWithLevels([]const u8, ctx, value_data);
+    errdefer discardBytesResult(allocator, typed_result);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -3006,4 +3044,31 @@ test "flat PLAIN fast path: OPTIONAL int64 with bit-packed def levels" {
     try std.testing.expect(r.values[1] == .null_val);
     try std.testing.expectEqual(@as(i64, -200), r.values[2].int64_val);
     try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
+}
+
+fn decodeOptionalPagesForOom(allocator: std.mem.Allocator) !void {
+    // levels 1,0,1 (RLE block: bit-packed run of 1 group), then values.
+    const levels = [_]u8{ 2, 0, 0, 0, 0x03, 0x05 };
+    const str_elem = format.SchemaElement{ .type_ = .byte_array, .repetition_type = .optional, .name = "s" };
+    const plain_page = levels ++ [_]u8{ 1, 0, 0, 0, 'a', 2, 0, 0, 0, 'b', 'c' };
+    var r1 = try decodeColumnDynamicWithValueEncoding(allocator, str_elem, &plain_page, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    r1.deinit(allocator);
+
+    const dict_page = [_]u8{ 1, 0, 0, 0, 'x', 1, 0, 0, 0, 'y' };
+    var dict = try dictionary.StringDictionary.fromPlain(allocator, &dict_page, 2);
+    defer dict.deinit();
+    const idx_page = levels ++ [_]u8{ 1, 0x03, 0x02 }; // bit width 1, indices 0,1
+    var r2 = try decodeColumnDynamicWithValueEncoding(allocator, str_elem, &idx_page, 3, 1, 0, true, &dict, null, null, null, null, null, null, .rle, .rle, .rle_dictionary);
+    r2.deinit(allocator);
+
+    // Repeated int32 (rep + def levels), general (non fast) path.
+    const int_elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .repeated, .name = "i" };
+    const rep_def = levels ++ levels;
+    const int_page = rep_def ++ [_]u8{ 7, 0, 0, 0, 9, 0, 0, 0 };
+    var r3 = try decodeColumnDynamicWithValueEncoding(allocator, int_elem, &int_page, 3, 1, 1, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    r3.deinit(allocator);
+}
+
+test "optional page decode frees everything on OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeOptionalPagesForOom, .{});
 }
