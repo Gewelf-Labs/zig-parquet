@@ -179,7 +179,42 @@ fn writeMixed5(a: Allocator, io: std.Io, path: []const u8, d: *const Data) anyer
 // Reader (timed) and harness
 // ---------------------------------------------------------------------------
 
-fn readAll(a: Allocator, io: std.Io, path: []const u8, comptime streaming: bool) anyerror!usize {
+/// Wrapping checksum term of one value: integers and float bits as u64, byte
+/// lengths for strings, 0 for nulls.
+fn valueSum(v: parquet.Value) u64 {
+    return switch (v) {
+        .int32_val => |x| @bitCast(@as(i64, x)),
+        .int64_val => |x| @bitCast(x),
+        .double_val => |x| @bitCast(x),
+        .bytes_val => |b| b.len,
+        else => 0,
+    };
+}
+
+/// The same checksum over the first column of the generated data.
+fn expectedSum(d: *const Data) u64 {
+    var sum: u64 = 0;
+    if (d.i32s.len > 0) {
+        for (d.i32s) |x| sum +%= valueSum(.{ .int32_val = x });
+    } else if (d.i64_opt.len > 0) {
+        for (d.i64_opt) |x| sum +%= switch (x) {
+            .value => |v| valueSum(.{ .int64_val = v }),
+            .null_value => 0,
+        };
+    } else if (d.f64_opt.len > 0) {
+        for (d.f64_opt) |x| sum +%= switch (x) {
+            .value => |v| valueSum(.{ .double_val = v }),
+            .null_value => 0,
+        };
+    } else {
+        for (d.strs) |x| sum +%= x.len;
+    }
+    return sum;
+}
+
+const ReadResult = struct { rows: usize, sum: u64 };
+
+fn readAll(a: Allocator, io: std.Io, path: []const u8, comptime streaming: bool) anyerror!ReadResult {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var reader = try parquet.openFileDynamic(a, file, io, .{});
@@ -187,11 +222,12 @@ fn readAll(a: Allocator, io: std.Io, path: []const u8, comptime streaming: bool)
     var it = if (streaming) reader.rowIteratorStreaming() else reader.rowIterator();
     defer it.deinit();
     var n: usize = 0;
+    var sum: u64 = 0;
     while (try it.next()) |row| {
-        std.mem.doNotOptimizeAway(row.values.len);
+        sum +%= valueSum(row.values[0]);
         n += 1;
     }
-    return n;
+    return .{ .rows = n, .sum = sum };
 }
 
 fn fileSize(io: std.Io, path: []const u8) anyerror!u64 {
@@ -218,8 +254,8 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
     var best_write: i96 = std.math.maxInt(i96);
     var best_read: i96 = std.math.maxInt(i96);
     var best_stream: i96 = std.math.maxInt(i96);
-    var read_rows: usize = 0;
-    var stream_rows: usize = 0;
+    var read_res: ReadResult = undefined;
+    var stream_res: ReadResult = undefined;
     for (0..runs) |_| {
         const w0 = std.Io.Timestamp.now(io, .awake);
         try sc.write(gpa, io, path, &data);
@@ -233,14 +269,16 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
         }
 
         const r0 = std.Io.Timestamp.now(io, .awake);
-        read_rows = try readAll(gpa, io, path, false);
+        read_res = try readAll(gpa, io, path, false);
         best_read = @min(best_read, r0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
 
         const s0 = std.Io.Timestamp.now(io, .awake);
-        stream_rows = try readAll(gpa, io, path, true);
+        stream_res = try readAll(gpa, io, path, true);
         best_stream = @min(best_stream, s0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
     }
-    if (read_rows != rows or stream_rows != rows) return error.RowCountMismatch;
+    if (read_res.rows != rows or stream_res.rows != rows) return error.RowCountMismatch;
+    const want_sum = expectedSum(&data);
+    if (read_res.sum != want_sum or stream_res.sum != want_sum) return error.ChecksumMismatch;
 
     const size = try fileSize(io, path);
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
