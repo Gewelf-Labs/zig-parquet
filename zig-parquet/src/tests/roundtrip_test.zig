@@ -4674,3 +4674,131 @@ test "zero-copy strings: readAllRows bytes survive later row groups" {
     try checkZcReadAll(false, .zstd);
     try checkZcReadAll(true, .zstd);
 }
+
+const v2_raw_strings = [_][]const u8{
+    "first value, long enough to notice reuse",
+    "second value, long enough to notice reuse",
+    "third value, long enough to notice reuse",
+    "fourth value, long enough to notice reuse",
+    "fifth value, long enough to notice reuse",
+};
+
+/// One optional string column whose chunk metadata says SNAPPY but whose only
+/// page is a DataPageV2 with is_compressed = false, so values are decoded
+/// straight from the chunk buffer. The schema and footer come from a normal
+/// file; only the column chunk is replaced.
+fn writeV2RawPageInSnappyChunk(allocator: std.mem.Allocator) ![]u8 {
+    var w = try parquet.createBufferDynamic(allocator);
+    defer w.deinit();
+    try w.addColumn("s", TypeInfo.string, .{});
+    try w.begin();
+    for (v2_raw_strings) |s| {
+        try w.setBytes(0, s);
+        try w.addRow();
+    }
+    try w.close();
+    const base = try w.toOwnedSlice();
+    defer allocator.free(base);
+    var reader = try parquet.openBufferDynamic(allocator, base, .{});
+    defer reader.deinit();
+
+    const n: i32 = v2_raw_strings.len;
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    // Definition levels: one RLE run of n ones (bit width 1), no length prefix in V2.
+    try body.writer.writeAll(&.{ @as(u8, v2_raw_strings.len << 1), 1 });
+    for (v2_raw_strings) |s| {
+        try body.writer.writeInt(u32, @intCast(s.len), .little);
+        try body.writer.writeAll(s);
+    }
+    const page_body = body.written();
+    const body_len: i32 = @intCast(page_body.len);
+
+    const thrift = parquet.internals.thrift;
+    var hdr = thrift.CompactWriter.init(allocator);
+    defer hdr.deinit();
+    try hdr.writeFieldHeader(1, .i32);
+    try hdr.writeI32(@intFromEnum(parquet.format.PageType.data_page_v2));
+    try hdr.writeFieldHeader(2, .i32);
+    try hdr.writeI32(body_len);
+    try hdr.writeFieldHeader(3, .i32);
+    try hdr.writeI32(body_len);
+    try hdr.writeFieldHeader(8, .struct_);
+    const saved = hdr.saveFieldId();
+    hdr.resetFieldTracking();
+    try hdr.writeFieldHeader(1, .i32);
+    try hdr.writeI32(n); // num_values
+    try hdr.writeFieldHeader(2, .i32);
+    try hdr.writeI32(0); // num_nulls
+    try hdr.writeFieldHeader(3, .i32);
+    try hdr.writeI32(n); // num_rows
+    try hdr.writeFieldHeader(4, .i32);
+    try hdr.writeI32(@intFromEnum(parquet.format.Encoding.plain));
+    try hdr.writeFieldHeader(5, .i32);
+    try hdr.writeI32(2); // definition_levels_byte_length
+    try hdr.writeFieldHeader(6, .i32);
+    try hdr.writeI32(0); // repetition_levels_byte_length
+    try hdr.writeBoolField(7, false); // is_compressed
+    try hdr.writeStructEnd();
+    hdr.restoreFieldId(saved);
+    try hdr.writeStructEnd();
+
+    const chunk_len: i64 = @intCast(hdr.getWritten().len + page_body.len);
+    const col = &reader.metadata.row_groups[0].columns[0];
+    col.file_offset = 4;
+    col.offset_index_offset = null;
+    col.offset_index_length = null;
+    col.column_index_offset = null;
+    col.column_index_length = null;
+    const meta = &col.meta_data.?;
+    meta.codec = .snappy;
+    meta.data_page_offset = 4;
+    meta.dictionary_page_offset = null;
+    meta.total_compressed_size = chunk_len;
+    meta.total_uncompressed_size = chunk_len;
+
+    var footer = thrift.CompactWriter.init(allocator);
+    defer footer.deinit();
+    try reader.metadata.serialize(&footer);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.writeAll("PAR1");
+    try out.writer.writeAll(hdr.getWritten());
+    try out.writer.writeAll(page_body);
+    try out.writer.writeAll(footer.getWritten());
+    try out.writer.writeInt(u32, @intCast(footer.getWritten().len), .little);
+    try out.writer.writeAll("PAR1");
+    return out.toOwnedSlice();
+}
+
+test "zero-copy strings: V2 uncompressed page in a compressed chunk" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeV2RawPageInSnappyChunk(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try std.testing.expectEqual(parquet.format.CompressionCodec.snappy, reader.metadata.row_groups[0].columns[0].meta_data.?.codec);
+
+    // readAllRows: checked after the read returns (the chunk buffer is gone).
+    const rows = try reader.readAllRows(0);
+    defer {
+        for (rows) |row| row.deinit();
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(v2_raw_strings.len, rows.len);
+    for (rows, v2_raw_strings) |row, s| try std.testing.expectEqualStrings(s, row.getColumn(0).?.asBytes().?);
+
+    var it = reader.rowIterator();
+    defer it.deinit();
+    var i: usize = 0;
+    while (try it.next()) |row| : (i += 1) try std.testing.expectEqualStrings(v2_raw_strings[i], row.getColumn(0).?.asBytes().?);
+    try std.testing.expectEqual(v2_raw_strings.len, i);
+
+    var sit = reader.rowIteratorStreaming();
+    defer sit.deinit();
+    i = 0;
+    while (try sit.next()) |row| : (i += 1) try std.testing.expectEqualStrings(v2_raw_strings[i], row.getColumn(0).?.asBytes().?);
+    try std.testing.expectEqual(v2_raw_strings.len, i);
+}

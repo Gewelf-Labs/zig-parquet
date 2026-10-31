@@ -888,20 +888,20 @@ pub const DynamicReader = struct {
         const prev_borrow = column_decoder.borrow_bytes;
         column_decoder.borrow_bytes = borrow_arena != null;
         defer column_decoder.borrow_bytes = prev_borrow;
-        // Page buffers (decompressed pages, or the whole chunk when uncompressed)
-        // go to the arena when borrowing and are then never freed here: an arena
-        // free of its last allocation would hand the bytes to the next page.
+        // Page buffers (the whole chunk and every decompressed page) go to the
+        // arena when borrowing and are then never freed here: an arena free of
+        // its last allocation would hand the bytes to the next page. The chunk
+        // goes there whatever the codec: a V2 page with is_compressed = false
+        // (or an empty values section) is decoded straight from the chunk.
         const page_alloc = borrow_arena orelse self.allocator;
         const free_pages = borrow_arena == null;
-        const chunk_alloc = if (meta.codec == .uncompressed) page_alloc else self.allocator;
-        const free_chunk = free_pages or meta.codec != .uncompressed;
 
         // Read the raw page data (or use caller's buffer).
         const owned_page_data: ?[]u8 = if (override_page_data == null)
-            try self.readColumnChunkData(chunk_alloc, chunk)
+            try self.readColumnChunkData(page_alloc, chunk)
         else
             null;
-        defer if (owned_page_data) |pd| if (free_chunk) chunk_alloc.free(pd);
+        defer if (owned_page_data) |pd| if (free_pages) page_alloc.free(pd);
         const page_data: []const u8 = owned_page_data orelse override_page_data.?;
 
         var pos: usize = 0;
