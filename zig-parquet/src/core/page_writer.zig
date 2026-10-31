@@ -9,6 +9,7 @@
 const std = @import("std");
 const format = @import("format.zig");
 const types = @import("types.zig");
+const safe = @import("safe.zig");
 const rle_encoder = @import("encoding/rle_encoder.zig");
 const plain_encoder = @import("encoding/plain_encoder.zig");
 const byte_stream_split_encoder = @import("encoding/byte_stream_split_encoder.zig");
@@ -585,6 +586,8 @@ pub fn writeDataPageOptionalWithEncoding(
     is_optional: bool,
     encoding: format.Encoding,
 ) PageWriteError!DataPageResult {
+    if (encoding == .plain and (T == i32 or T == i64 or T == f32 or T == f64 or T == bool)) return writePlainPageOptional(allocator, T, values, is_optional);
+
     // Separate into non-null values and definition mask
     var non_null_values: std.ArrayList(T) = .empty;
     defer non_null_values.deinit(allocator);
@@ -789,6 +792,8 @@ pub fn writeDataPageByteArrayOptionalWithEncoding(
     is_optional: bool,
     encoding: format.Encoding,
 ) PageWriteError!DataPageResult {
+    if (encoding == .plain) return writePlainByteArrayPageOptional(allocator, values, is_optional);
+
     var non_null_values: std.ArrayList([]const u8) = .empty;
     defer non_null_values.deinit(allocator);
 
@@ -818,4 +823,204 @@ pub fn writeDataPageByteArrayOptionalWithEncoding(
         };
     }
     return combineDefLevelsAndValues(allocator, is_defined.items, encoded_values, values.len);
+}
+
+// =============================================================================
+// PLAIN fast paths: the whole page is built in one buffer
+// =============================================================================
+
+/// PLAIN page built in one buffer: [u32 len + def levels] (optional only), then
+/// the non-null values. Byte-identical to the general path.
+fn writePlainPageOptional(allocator: std.mem.Allocator, comptime T: type, values: []const Optional(T), is_optional: bool) PageWriteError!DataPageResult {
+    var non_null: usize = 0;
+    for (values) |v| {
+        if (v != .null_value) non_null += 1;
+    }
+    if (!is_optional and non_null != values.len) return error.NullInRequiredColumn;
+
+    const value_bytes = if (T == bool) (non_null + 7) / 8 else std.math.mul(usize, non_null, @sizeOf(T)) catch return error.IntegerOverflow;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, value_bytes + values.len / 4 + 16);
+    if (is_optional) try rle_encoder.appendDefLevelsWithLength(T, &out, allocator, values);
+
+    const start = out.items.len;
+    try out.appendNTimes(allocator, 0, value_bytes); // zeroed: bool packing ORs bits in
+    const dst = out.items[start..];
+    var k: usize = 0;
+    for (values) |v| switch (v) {
+        .null_value => {},
+        .value => |x| {
+            if (T == bool) {
+                if (x) dst[k / 8] |= @as(u8, 1) << @as(u3, @truncate(k)); // k % 8 fits u3 (LSB-first bit order)
+            } else {
+                const Bits = if (@sizeOf(T) == 4) u32 else u64;
+                std.mem.writeInt(Bits, dst[k * @sizeOf(T) ..][0..@sizeOf(T)], @bitCast(x), .little);
+            }
+            k += 1;
+        },
+    };
+    return .{ .data = try out.toOwnedSlice(allocator), .num_values = values.len, .num_non_null = non_null };
+}
+
+/// PLAIN byte-array page built in one buffer: [u32 len + def levels] (optional
+/// only), then `u32 LE len + bytes` per non-null value. Byte-identical to the
+/// general path, including its error order (NullInRequiredColumn before ValueTooLarge).
+fn writePlainByteArrayPageOptional(allocator: std.mem.Allocator, values: []const Optional([]const u8), is_optional: bool) PageWriteError!DataPageResult {
+    var non_null: usize = 0;
+    var payload: usize = 0;
+    var too_large = false;
+    for (values) |v| switch (v) {
+        .null_value => {},
+        .value => |s| {
+            non_null += 1;
+            if (s.len > std.math.maxInt(i32)) too_large = true;
+            const entry = std.math.add(usize, 4, s.len) catch return error.OutOfMemory;
+            payload = std.math.add(usize, payload, entry) catch return error.OutOfMemory;
+        },
+    };
+    if (!is_optional and non_null != values.len) return error.NullInRequiredColumn;
+    if (too_large) return error.ValueTooLarge;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, payload + values.len / 4 + 16);
+    if (is_optional) try rle_encoder.appendDefLevelsWithLength([]const u8, &out, allocator, values);
+
+    for (values) |v| switch (v) {
+        .null_value => {},
+        .value => |s| {
+            // Lengths were checked against maxInt(i32) in the count pass, so the u32 cast cannot fail.
+            const len32 = safe.castTo(u32, s.len) catch unreachable; // checked against maxInt(i32) above
+            var len_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &len_bytes, len32, .little);
+            try out.appendSlice(allocator, &len_bytes);
+            try out.appendSlice(allocator, s);
+        },
+    };
+    return .{ .data = try out.toOwnedSlice(allocator), .num_values = values.len, .num_non_null = non_null };
+}
+
+fn testSampleValue(comptime T: type, i: usize) T {
+    return switch (T) {
+        i64 => @as(i64, @intCast(i)) * 1000003 - 17,
+        f32 => @as(f32, @floatFromInt(i)) * 0.25 - 3.0,
+        bool => i % 3 == 1,
+        else => @compileError("no test sample for " ++ @typeName(T)),
+    };
+}
+
+test "PLAIN fixed-width optional page is byte-identical to the general path" {
+    const allocator = std.testing.allocator;
+    const sizes = [_]usize{ 0, 1, 7, 8, 9, 100, 1000 };
+    const null_pcts = [_]u32{ 0, 5, 33, 100 };
+    var prng = std.Random.DefaultPrng.init(0x3303);
+    const random = prng.random();
+
+    inline for (.{ i64, f32, bool }) |T| {
+        for (sizes) |n| {
+            for (null_pcts) |pct| {
+                for ([_]bool{ true, false }) |is_optional| {
+                    if (!is_optional and pct != 0) continue; // required columns cannot hold nulls
+
+                    const vals = try allocator.alloc(Optional(T), n);
+                    defer allocator.free(vals);
+                    const is_def = try allocator.alloc(bool, n);
+                    defer allocator.free(is_def);
+                    var non_null: std.ArrayList(T) = .empty;
+                    defer non_null.deinit(allocator);
+                    for (vals, is_def, 0..) |*v, *d, i| {
+                        const is_null = random.uintLessThan(u32, 100) < pct;
+                        d.* = !is_null;
+                        v.* = if (is_null) .null_value else .{ .value = testSampleValue(T, i) };
+                        if (!is_null) try non_null.append(allocator, testSampleValue(T, i));
+                    }
+
+                    var want = try writeDataPageTypedWithEncoding(allocator, T, non_null.items, is_def, is_optional, .plain);
+                    defer want.deinit(allocator);
+                    var got = try writeDataPageOptionalWithEncoding(allocator, T, vals, is_optional, .plain);
+                    defer got.deinit(allocator);
+
+                    try std.testing.expectEqualSlices(u8, want.data, got.data);
+                    try std.testing.expectEqual(want.num_values, got.num_values);
+                    try std.testing.expectEqual(want.num_non_null, got.num_non_null);
+                }
+            }
+        }
+    }
+}
+
+test "PLAIN optional page: null in a required column is an error" {
+    const allocator = std.testing.allocator;
+    const vals = [_]Optional(i64){ .{ .value = 1 }, .null_value };
+    try std.testing.expectError(error.NullInRequiredColumn, writeDataPageOptionalWithEncoding(allocator, i64, &vals, false, .plain));
+}
+
+test "PLAIN byte-array optional page is byte-identical to the general path" {
+    const allocator = std.testing.allocator;
+    const sizes = [_]usize{ 0, 1, 7, 8, 9, 100, 1000 };
+    const null_pcts = [_]u32{ 0, 5, 33, 100 };
+    var prng = std.Random.DefaultPrng.init(0x3304);
+    const random = prng.random();
+
+    for (sizes) |n| {
+        for (null_pcts) |pct| {
+            for ([_]bool{ true, false }) |is_optional| {
+                if (!is_optional and pct != 0) continue;
+
+                // Owned byte strings of varying length (including empty), as a flat list.
+                const bufs = try allocator.alloc([]u8, n);
+                defer allocator.free(bufs);
+                var made: usize = 0;
+                defer for (bufs[0..made]) |b| allocator.free(b);
+                for (bufs, 0..) |*b, i| {
+                    b.* = try allocator.alloc(u8, i % 7);
+                    @memset(b.*, @as(u8, @intCast('a' + i % 26)));
+                    made += 1;
+                }
+
+                const vals = try allocator.alloc(Optional([]const u8), n);
+                defer allocator.free(vals);
+                const is_def = try allocator.alloc(bool, n);
+                defer allocator.free(is_def);
+                var non_null: std.ArrayList([]const u8) = .empty;
+                defer non_null.deinit(allocator);
+                for (vals, is_def, bufs) |*v, *d, b| {
+                    const is_null = random.uintLessThan(u32, 100) < pct;
+                    d.* = !is_null;
+                    v.* = if (is_null) .null_value else .{ .value = b };
+                    if (!is_null) try non_null.append(allocator, b);
+                }
+
+                // General path: encode the non-null values, then add levels.
+                const enc = try encodeByteArraysWithEncoding(allocator, non_null.items, .plain);
+                defer allocator.free(enc);
+                const want_data: []u8 = if (is_optional) blk: {
+                    const combined = try combineDefLevelsAndValues(allocator, is_def, enc, n);
+                    break :blk combined.data;
+                } else try allocator.dupe(u8, enc);
+                defer allocator.free(want_data);
+
+                var got = try writeDataPageByteArrayOptionalWithEncoding(allocator, vals, is_optional, .plain);
+                defer got.deinit(allocator);
+
+                try std.testing.expectEqualSlices(u8, want_data, got.data);
+                try std.testing.expectEqual(n, got.num_values);
+                try std.testing.expectEqual(non_null.items.len, got.num_non_null);
+            }
+        }
+    }
+}
+
+test "PLAIN byte-array optional page: NullInRequiredColumn is reported before ValueTooLarge" {
+    const allocator = std.testing.allocator;
+    // Fake slice: only its length is read before the error is returned, never its bytes.
+    const huge_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge: []const u8 = @as([*]const u8, @ptrFromInt(0x1000))[0..huge_len];
+
+    const null_then_huge = [_]Optional([]const u8){ .null_value, .{ .value = huge } };
+    try std.testing.expectError(error.NullInRequiredColumn, writeDataPageByteArrayOptionalWithEncoding(allocator, &null_then_huge, false, .plain));
+
+    const huge_only = [_]Optional([]const u8){.{ .value = huge }};
+    try std.testing.expectError(error.ValueTooLarge, writeDataPageByteArrayOptionalWithEncoding(allocator, &huge_only, true, .plain));
 }
