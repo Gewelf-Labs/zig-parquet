@@ -12,14 +12,16 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        zig: [0.16.0, 0.17.0]
     runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }}, zig ${{ matrix.zig }})
 
     steps:
       - uses: actions/checkout@v5
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0
+          version: ${{ matrix.zig }}
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -68,7 +70,8 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0
+          # single toolchain for published binaries; the test job covers 0.16 and 0.17
+          version: 0.16.0
 
       - name: Build
         working-directory: cli

@@ -11,14 +11,16 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        zig: [0.16.0, 0.17.0]
     runs-on: ${{ matrix.os }}
+    name: zig-parquet (${{ matrix.os }}, zig ${{ matrix.zig }})
 
     steps:
       - uses: actions/checkout@v5
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0
+          version: ${{ matrix.zig }}
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -59,6 +61,47 @@ jobs:
       - name: Check interop artifacts are up to date
         run: git diff --exit-code test-files-arrow/interop/
 
+  c-codecs:
+    strategy:
+      matrix:
+        zig: [0.16.0, 0.17.0]
+    runs-on: ubuntu-latest
+    name: c-codecs (zig ${{ matrix.zig }})
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Generate test files
+        working-directory: test-files-arrow
+        run: uv run python generate.py
+
+      - name: Run tests with C codecs only
+        working-directory: zig-parquet
+        run: zig build test -Dcodecs=c-only
+
+  fmt:
+    runs-on: ubuntu-latest
+    name: fmt (zig 0.16.0)
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          # 0.17's fmt emits 0.17-only builtins; formatting is 0.16-only (see AGENTS.md)
+          version: 0.16.0
+
+      - name: Check formatting
+        run: zig fmt --check zig-parquet/src zig-parquet/build.zig zig-parquet/bench cli/src cli/build.zig
+
   interop:
     runs-on: ubuntu-latest
 
@@ -78,14 +121,16 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        zig: [0.16.0, 0.17.0]
     runs-on: ${{ matrix.os }}
+    name: pqi (${{ matrix.os }}, zig ${{ matrix.zig }})
 
     steps:
       - uses: actions/checkout@v5
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.17.0
+          version: ${{ matrix.zig }}
 
       - uses: astral-sh/setup-uv@v7
         with:
