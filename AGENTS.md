@@ -74,7 +74,7 @@ Every line under `zig-parquet/` and `cli/` must compile on both Zig 0.16.0 and 0
 | `@cImport` / `@cInclude` | hand-written `const c = struct { extern fn ...; }` |
 | `allocator.dupeZ(u8, x)` | `allocator.dupeSentinel(u8, x, 0)` |
 | `std.hash.crc.Crc32`, `crc.@"CRC-32/ISO-HDLC"` | `std.hash.Crc32` |
-| `b.args` / `run.addPassthruArgs()` in build.zig | `passArgs(b, run)` helper (task 1.2) |
+| `b.args` / `run.addPassthruArgs()` in build.zig | `passArgs(b, run)` helper |
 | `@backingInt`, `@fromBackingInt` | `@intFromEnum`, `@enumFromInt` |
 | `allocator.print(...)`, `allocator.printSentinel(...)` | `std.fmt.allocPrint(...)`, `std.fmt.allocPrintSentinel(...)` |
 | `std.heap.SafeAllocator`, `std.heap.GeneralPurposeAllocator` | `std.heap.DebugAllocator(.{})` |

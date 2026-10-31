@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Performance
-- Streaming row iterator: `DynamicReader.rowIteratorStreaming()` and `rowIteratorStreamingProjected()` return a `StreamingRowIterator` that reuses one row buffer. Contract: the row and its byte slices are valid until the next `next()` or `deinit()`. Memory is bounded by one row group.
+- Streaming row iterator: `DynamicReader.rowIteratorStreaming()` and `rowIteratorStreamingProjected()` return a `StreamingRowIterator` that reuses one row buffer. Contract: the row and its byte slices are valid until the next `next()` or `deinit()`. Memory is bounded by one row group. If loading a row group fails, the next `next()` retries that row group.
 - Zero-copy byte arrays on flat reads: PLAIN and dictionary BYTE_ARRAY values (V1 and V2) are slices of the page buffer instead of per-value copies.
 - Flat PLAIN fast path for INT32, INT64, FLOAT and DOUBLE pages.
 - Word-at-a-time bit unpacking for RLE and bit-packed runs; RLE fill uses memset.
@@ -42,6 +42,7 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - Bit unpacking overflowed `u5` for bit widths 25-31: the byte count was computed in `u5`. This panicked in Debug builds and gave a wrong byte count in ReleaseFast. Fixed by computing in `usize`.
 - Overflow-checked level and bit-pack sizes: `bitPackedSize` returns `error.Overflow`, and V2 level cursor checks are overflow-safe.
 - Out-of-memory leaks: footer parsers (`ColumnChunk`, `Statistics`, `RowGroup`, `SchemaElement`, `KeyValue`, `FileMetaData`) free partial allocations; nested assembly frees the partial list item and struct field; dynamic decoders free def/rep levels and page results.
+- FIXED_LEN_BYTE_ARRAY dictionary pages with BIT_PACKED levels longer than the page panicked; they now return `error.EndOfData`.
 - Repeated footer lists (schema, row groups, key/value metadata) leaked the earlier value; they are now freed before replacement.
 
 ## [0.2.0] - 2026-04-07
