@@ -48,7 +48,7 @@ fn outputJson(
     writer: *std.Io.Writer,
 ) !void {
     _ = allocator;
-    var iter = reader.rowIterator();
+    var iter = reader.rowIteratorStreaming();
     defer iter.deinit();
 
     while (try iter.next()) |row| {
@@ -96,7 +96,7 @@ fn outputTable(
         col_widths[i] = name.len;
     }
 
-    var iter = reader.rowIterator();
+    var iter = reader.rowIteratorStreaming();
     defer iter.deinit();
 
     while (try iter.next()) |row| {

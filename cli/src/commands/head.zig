@@ -56,7 +56,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, num_
         col_widths[i] = name.len;
     }
 
-    var iter = reader.rowIterator();
+    var iter = reader.rowIteratorStreaming();
     defer iter.deinit();
     var rows_collected: usize = 0;
 
