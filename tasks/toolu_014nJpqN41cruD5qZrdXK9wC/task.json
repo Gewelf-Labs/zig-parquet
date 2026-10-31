@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_014nJpqN41cruD5qZrdXK9wC",
+  "agent_id": "a08f474f0615e136a",
+  "task_description": "Haiku: OOM leak errdefers",
+  "token_usage": {
+    "input_tokens": 52,
+    "cache_creation_tokens": 102327,
+    "cache_read_tokens": 2902302,
+    "output_tokens": 35082,
+    "api_call_count": 25
+  },
+  "started_at": "2026-10-30T22:10:28.8482342-04:00",
+  "completed_at": "2026-10-30T22:13:08.1534074-04:00"
+}

@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01BzCAgGuwnYzWq9USXPXrMw",
+  "agent_id": "acc565a64224de696",
+  "task_description": "Opus: streaming row iterator",
+  "token_usage": {
+    "input_tokens": 132,
+    "cache_creation_tokens": 166798,
+    "cache_read_tokens": 10035955,
+    "output_tokens": 64554,
+    "api_call_count": 66
+  },
+  "started_at": "2026-10-30T21:20:49.4848387-04:00",
+  "completed_at": "2026-10-30T22:09:22.6217723-04:00"
+}
