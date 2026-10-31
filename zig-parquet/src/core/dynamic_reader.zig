@@ -342,6 +342,127 @@ pub const DynamicReader = struct {
         };
     }
 
+    /// Row iterator that builds each row on `next()` in one reused buffer, with
+    /// no per-row allocation.
+    ///
+    /// Contract: the row returned by `next()`, its `values` and any byte slices
+    /// inside them are valid only until the next call to `next()` or `deinit()`.
+    /// The next call overwrites them; copy anything you need to keep. Do not call
+    /// `deinit()` on the returned row.
+    ///
+    /// Memory is bounded by one row group: its decoded columns plus their byte
+    /// payloads, which live in an iterator arena reset at each row group. When a
+    /// requested column is nested, that row group is assembled whole, as by
+    /// `RowIterator` (same results, no speedup; byte payloads then live in the
+    /// reader's arena until the reader is deinitialized).
+    pub const StreamingRowIterator = struct {
+        reader: *Self,
+        col_indices: ?[]const usize,
+        current_rg: usize = 0,
+        cursor: usize = 0,
+        num_rows: usize = 0,
+        /// Flat row group: decoded columns indexed by leaf, the leaf of each
+        /// output column, and the reused row (`row.values` is the row buffer).
+        column_values: [][]Value = &.{},
+        leaves: []usize = &.{},
+        row: Row,
+        /// Nested row group: all of its rows.
+        fallback_rows: ?[]Row = null,
+        /// Byte payloads of the current flat row group.
+        arena: std.heap.ArenaAllocator,
+
+        /// Return the next row, or null when all row groups are exhausted. See
+        /// the type's doc comment for the lifetime of the returned row.
+        pub fn next(self: *StreamingRowIterator) !?*const Row {
+            while (self.cursor >= self.num_rows) {
+                self.freeGroup();
+                if (self.current_rg >= self.reader.metadata.row_groups.len) return null;
+                self.current_rg += 1;
+                try self.loadGroup(self.current_rg - 1);
+            }
+            const r = self.cursor;
+            self.cursor += 1;
+            if (self.fallback_rows) |rows| return &rows[r];
+            fillFlatRow(self.row.values, self.column_values, self.leaves, r);
+            return &self.row;
+        }
+
+        /// Free the current row group and the iterator arena.
+        pub fn deinit(self: *StreamingRowIterator) void {
+            self.freeGroup();
+            self.arena.deinit();
+        }
+
+        /// Decode row group `rg_idx`. On error, whatever was loaded stays in
+        /// `self` with `num_rows == 0`, so the next `next()` or `deinit()` frees it.
+        fn loadGroup(self: *StreamingRowIterator, rg_idx: usize) !void {
+            const reader = self.reader;
+            const gpa = reader.allocator;
+            const rg = &reader.metadata.row_groups[rg_idx];
+            const num_rows = try safeRowCount(rg.num_rows);
+            if (num_rows == 0 or rg.columns.len == 0) return;
+
+            self.leaves = (try reader.planFlatLeaves(rg.columns.len, self.col_indices)) orelse {
+                const rows = try reader.readRowsInternal(rg_idx, self.col_indices, null);
+                self.fallback_rows = rows;
+                self.num_rows = rows.len;
+                return;
+            };
+            self.column_values = try gpa.alloc([]Value, rg.columns.len);
+            @memset(self.column_values, &.{});
+            self.row.values = try gpa.alloc(Value, self.leaves.len);
+
+            const prev_bytes_alloc = value_mod.bytes_arena_allocator;
+            value_mod.bytes_arena_allocator = self.arena.allocator();
+            defer value_mod.bytes_arena_allocator = prev_bytes_alloc;
+            try reader.readFlatColumns(rg_idx, self.leaves, self.column_values);
+            self.num_rows = num_rows;
+        }
+
+        fn freeGroup(self: *StreamingRowIterator) void {
+            const gpa = self.reader.allocator;
+            if (self.fallback_rows) |rows| {
+                for (rows) |row| row.deinit();
+                gpa.free(rows);
+                self.fallback_rows = null;
+            }
+            // Flat leaf values are scalars or byte slices in `arena`, so only the
+            // arrays are freed; the arena reset releases the bytes.
+            for (self.column_values) |vals| gpa.free(vals);
+            gpa.free(self.column_values);
+            self.column_values = &.{};
+            gpa.free(self.leaves);
+            self.leaves = &.{};
+            gpa.free(self.row.values);
+            self.row.values = &.{};
+            _ = self.arena.reset(.retain_capacity);
+            self.cursor = 0;
+            self.num_rows = 0;
+        }
+    };
+
+    /// Create a streaming row iterator over all row groups (see
+    /// `StreamingRowIterator` for the row lifetime contract).
+    /// No I/O occurs until the first call to `next()`.
+    pub fn rowIteratorStreaming(self: *Self) StreamingRowIterator {
+        return self.rowIteratorStreamingInternal(null);
+    }
+
+    /// Streaming row iterator over the given top-level columns, in that order.
+    /// `col_indices` must outlive the iterator.
+    pub fn rowIteratorStreamingProjected(self: *Self, col_indices: []const usize) StreamingRowIterator {
+        return self.rowIteratorStreamingInternal(col_indices);
+    }
+
+    fn rowIteratorStreamingInternal(self: *Self, col_indices: ?[]const usize) StreamingRowIterator {
+        return .{
+            .reader = self,
+            .col_indices = col_indices,
+            .row = .{ .values = &.{}, .allocator = self.allocator, .bytes_borrowed = true, .values_borrowed = true },
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
+        };
+    }
+
     /// Read all rows from a row group as dynamic Value types
     pub fn readAllRows(self: *Self, row_group_index: usize) ![]Row {
         return self.readRowsInternal(row_group_index, null, null);

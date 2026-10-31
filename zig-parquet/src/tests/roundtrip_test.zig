@@ -4241,6 +4241,150 @@ test "readRowsProjected flat columns after a nested column use leaf indices" {
     }
 }
 
+/// int64 "i" and string "s" with values `i` and "s{i}", 25 rows in row groups
+/// of 10, 10 and 5.
+fn writeInt64StringGroups(allocator: std.mem.Allocator) ![]u8 {
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+
+    try writer.addColumn("i", TypeInfo.int64, .{});
+    try writer.addColumn("s", TypeInfo.string, .{});
+    writer.setRowGroupSize(10);
+    try writer.begin();
+
+    var buf: [8]u8 = undefined;
+    for (0..25) |i| {
+        try writer.setInt64(0, @as(i64, @intCast(i)));
+        try writer.setBytes(1, try std.fmt.bufPrint(&buf, "s{d}", .{i}));
+        try writer.addRow();
+    }
+    try writer.close();
+    return writer.toOwnedSlice();
+}
+
+test "rowIteratorStreaming flat columns across row groups" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reader.getNumRowGroups());
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var expect_buf: [8]u8 = undefined;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqual(@as(i64, @intCast(count)), row.getColumn(0).?.asInt64().?);
+        const expected = try std.fmt.bufPrint(&expect_buf, "s{d}", .{count});
+        try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+    // Exhausted iterators stay exhausted.
+    try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
+}
+
+test "rowIteratorStreaming row is overwritten by the next call" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    const first = (try iter.next()).?;
+    try std.testing.expectEqual(@as(i64, 0), first.getColumn(0).?.asInt64().?);
+    const second = (try iter.next()).?;
+    // Same row object; its values now hold row 1.
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(@as(i64, 1), first.getColumn(0).?.asInt64().?);
+    try std.testing.expectEqualStrings("s1", first.getColumn(1).?.asBytes().?);
+}
+
+test "rowIteratorStreamingProjected flat columns after a nested column" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreamingProjected(&.{ 2, 1 });
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], row.getColumn(0).?.asBytes().?);
+        try std.testing.expectEqual(@as(i64, @intCast(count)) * 100, row.getColumn(1).?.asInt64().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "rowIteratorStreaming nested schema falls back to row group assembly" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 3), row.columnCount());
+        const item = row.getColumn(0).?.asStruct().?;
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], item[0].value.asBytes().?);
+        try std.testing.expectEqual(@as(i32, @intCast(count)), item[1].value.asInt32().?);
+        try std.testing.expectEqual(@as(i64, @intCast(count)) * 100, row.getColumn(1).?.asInt64().?);
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], row.getColumn(2).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "rowIteratorStreaming on empty file returns null immediately" {
+    const allocator = std.testing.allocator;
+
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+    try writer.addColumn("x", parquet.TypeInfo.int32, .{});
+    try writer.begin();
+    try writer.close();
+    const buffer = try writer.toOwnedSlice();
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+    try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
+}
+
+test "rowIteratorStreamingProjected rejects an out-of-range column" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreamingProjected(&.{5});
+    defer iter.deinit();
+    try std.testing.expectError(error.InvalidArgument, iter.next());
+}
+
 test "rowIterator on empty file returns null immediately" {
     const allocator = std.testing.allocator;
 
