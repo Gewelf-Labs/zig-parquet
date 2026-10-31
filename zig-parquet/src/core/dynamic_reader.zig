@@ -924,6 +924,7 @@ pub const DynamicReader = struct {
                     if (int96_dict) |*d| d else null,
                     value_encoding,
                 );
+                errdefer page_result.deinit(self.allocator);
 
                 // Take ownership of the page's values. The first page's buffer becomes
                 // the chunk buffer, so single-page chunks are never copied.
@@ -939,10 +940,12 @@ pub const DynamicReader = struct {
                 if (page_result.def_levels) |dl| {
                     if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
+                    page_result.def_levels = null;
                 }
                 if (page_result.rep_levels) |rl| {
                     if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
+                    page_result.rep_levels = null;
                 }
             } else if (page_header.data_page_header) |dph| {
                 // DataPageV1: levels are inside compressed data with length prefixes
@@ -983,6 +986,7 @@ pub const DynamicReader = struct {
                     rep_level_encoding,
                     value_encoding_v1,
                 );
+                errdefer page_result.deinit(self.allocator);
 
                 // Take ownership of the page's values. The first page's buffer becomes
                 // the chunk buffer, so single-page chunks are never copied.
@@ -998,10 +1002,12 @@ pub const DynamicReader = struct {
                 if (page_result.def_levels) |dl| {
                     if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
+                    page_result.def_levels = null;
                 }
                 if (page_result.rep_levels) |rl| {
                     if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
+                    page_result.rep_levels = null;
                 }
             }
         }
