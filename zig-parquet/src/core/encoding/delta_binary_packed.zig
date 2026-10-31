@@ -77,12 +77,13 @@ pub fn Decoder(comptime T: type) type {
                 return allocator.alloc(T, 0) catch return error.OutOfMemory;
             }
 
-            // A bit_width 0 mini-block of 32 values costs at least 1 header byte
-            // per mini-block plus the block's min_delta varint, so 128 values
-            // per input byte is a generous ceiling.
+            // A bit_width 0 mini-block costs at least its 1 bit-width byte and
+            // yields mini_block_size values, so no valid page holds more than
+            // mini_block_size values per input byte.
             // ponytail: heuristic cap; thread AllocationLimits from parquet_reader.zig
             // into the delta decoders for a proper bound.
-            const value_cap = std.math.mul(usize, self.data.len, 128) catch std.math.maxInt(usize);
+            const mini_block_size = self.block_size / self.num_mini_blocks;
+            const value_cap = std.math.mul(usize, self.data.len, mini_block_size) catch std.math.maxInt(usize);
             if (self.total_values > value_cap) return error.InvalidValueCount;
 
             // Allocate result
@@ -99,7 +100,6 @@ pub fn Decoder(comptime T: type) type {
             // Decode remaining values in blocks
             var values_decoded: usize = 1;
             var last_value = self.first_value;
-            const mini_block_size = self.block_size / self.num_mini_blocks;
 
             while (values_decoded < self.total_values) {
                 // Read block header
@@ -406,4 +406,15 @@ test "delta binary packed rejects unbounded value count" {
         0,    0,
     };
     try std.testing.expectError(error.InvalidValueCount, decodeInt32(allocator, &data));
+}
+
+test "delta binary packed accepts large mini-blocks at bit width 0" {
+    const allocator = std.testing.allocator;
+    // block_size = 1024, num_mini_blocks = 1, total = 2049, first = 0,
+    // then three blocks of (min_delta = 0, bit_width = 0): 1024 values per byte pair.
+    const data = [_]u8{ 0x80, 0x08, 0x01, 0x81, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const values = try decodeInt32(allocator, &data);
+    defer allocator.free(values);
+    try std.testing.expectEqual(@as(usize, 2049), values.len);
+    for (values) |v| try std.testing.expectEqual(@as(i32, 0), v);
 }
