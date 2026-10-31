@@ -4288,6 +4288,30 @@ test "rowIteratorStreaming flat columns across row groups" {
     try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
 }
 
+test "rowIterator arena resets across row group boundaries" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    // 3 row groups: the iterator arena backing the row values resets twice.
+    var iter = reader.rowIterator();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var expect_buf: [8]u8 = undefined;
+    while (try iter.next()) |row| {
+        try std.testing.expect(row.values_borrowed);
+        try std.testing.expectEqual(@as(i64, @intCast(count)), row.getColumn(0).?.asInt64().?);
+        const expected = try std.fmt.bufPrint(&expect_buf, "s{d}", .{count});
+        try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
 test "rowIteratorStreaming row is overwritten by the next call" {
     const allocator = std.testing.allocator;
     const buffer = try writeInt64StringGroups(allocator);

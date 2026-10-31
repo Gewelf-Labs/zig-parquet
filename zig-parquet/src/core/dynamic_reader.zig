@@ -272,6 +272,9 @@ pub const DynamicReader = struct {
         current_rg: usize,
         num_rgs: usize,
         col_indices: ?[]const usize,
+        /// Backs the value slices of `current_rows` (flat reads). Reset when the
+        /// iterator moves past a row group; freed by `deinit`.
+        arena: std.heap.ArenaAllocator,
 
         /// Advance to the next row. Returns a pointer to the current row,
         /// or null when all row groups have been exhausted.
@@ -290,7 +293,7 @@ pub const DynamicReader = struct {
 
                 if (self.current_rg >= self.num_rgs) return null;
 
-                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices, null);
+                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices, &self.arena);
                 self.current_rg += 1;
 
                 if (rows.len > 0) {
@@ -302,9 +305,10 @@ pub const DynamicReader = struct {
             }
         }
 
-        /// Free any currently held rows.
+        /// Free any currently held rows and the iterator arena.
         pub fn deinit(self: *RowIterator) void {
             self.freeCurrentRows();
+            self.arena.deinit();
         }
 
         fn freeCurrentRows(self: *RowIterator) void {
@@ -313,6 +317,7 @@ pub const DynamicReader = struct {
                 self.reader.allocator.free(rows);
                 self.current_rows = null;
             }
+            _ = self.arena.reset(.retain_capacity);
         }
     };
 
@@ -326,6 +331,7 @@ pub const DynamicReader = struct {
             .current_rg = 0,
             .num_rgs = self.metadata.row_groups.len,
             .col_indices = null,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
         };
     }
 
@@ -339,6 +345,7 @@ pub const DynamicReader = struct {
             .current_rg = 0,
             .num_rgs = self.metadata.row_groups.len,
             .col_indices = col_indices,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
         };
     }
 
