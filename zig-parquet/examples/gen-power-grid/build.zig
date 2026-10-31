@@ -47,7 +47,16 @@ pub fn build(b: *std.Build) void {
 
     const run_read = b.addRunArtifact(read_exe);
     run_read.step.dependOn(b.getInstallStep());
-    run_read.addPassthruArgs();
+    passArgs(b, run_read);
     const run_read_step = b.step("read", "Read random segment from grid data file");
     run_read_step.dependOn(&run_read.step);
+}
+
+/// Forward `zig build <step> -- args...` on Zig 0.16 (`b.args`) and 0.17 (`addPassthruArgs`).
+fn passArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
+    }
 }

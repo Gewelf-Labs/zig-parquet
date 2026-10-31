@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
         bench_mod.addImport("parquet", parquet_mod);
         const bench_exe = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
         const bench_run = b.addRunArtifact(bench_exe);
-        if (b.args) |args| bench_run.addArgs(args);
+        passArgs(b, bench_run);
         b.step("bench", "Build and run the benchmark harness").dependOn(&bench_run.step);
     }
 
@@ -513,3 +513,12 @@ const zlib_sources = &[_][]const u8{
     "uncompr.c",
     "zutil.c",
 };
+
+/// Forward `zig build <step> -- args...` on Zig 0.16 (`b.args`) and 0.17 (`addPassthruArgs`).
+fn passArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
+    }
+}
