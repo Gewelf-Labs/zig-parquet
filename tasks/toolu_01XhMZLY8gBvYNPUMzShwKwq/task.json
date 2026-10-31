@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01XhMZLY8gBvYNPUMzShwKwq",
+  "agent_id": "aaa773849b8e67056",
+  "task_description": "Haiku: reproduce list<struct> schema bug",
+  "token_usage": {
+    "input_tokens": 50,
+    "cache_creation_tokens": 118925,
+    "cache_read_tokens": 2291467,
+    "output_tokens": 23222,
+    "api_call_count": 25
+  },
+  "started_at": "2026-10-31T08:19:36.8039584-04:00",
+  "completed_at": "2026-10-31T08:27:54.1507786-04:00"
+}

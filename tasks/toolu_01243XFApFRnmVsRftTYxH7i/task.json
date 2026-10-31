@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01243XFApFRnmVsRftTYxH7i",
+  "agent_id": "ad09652ad5aa83b42",
+  "task_description": "Haiku: geo crs OOM errdefer + test",
+  "token_usage": {
+    "input_tokens": 46,
+    "cache_creation_tokens": 123211,
+    "cache_read_tokens": 2266810,
+    "output_tokens": 28329,
+    "api_call_count": 23
+  },
+  "started_at": "2026-10-31T08:19:36.7994585-04:00",
+  "completed_at": "2026-10-31T08:43:40.2216628-04:00"
+}
