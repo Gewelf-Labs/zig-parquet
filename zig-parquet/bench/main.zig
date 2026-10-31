@@ -3,8 +3,9 @@
 //! Usage: zig build bench -Dcodecs=zig-only -Doptimize=ReleaseFast -- [rows]
 //!
 //! For each scenario: generates data (untimed), writes a Parquet file (timed),
-//! reads all rows back with DynamicReader (timed). Each phase runs 3 times and
-//! the best time is reported.
+//! reads all rows back with DynamicReader.rowIterator (timed, `read_*`) and with
+//! DynamicReader.rowIteratorStreaming (timed, `read_stream_*`). Each phase runs
+//! 3 times and the best time is reported.
 
 const std = @import("std");
 const parquet = @import("parquet");
@@ -178,12 +179,12 @@ fn writeMixed5(a: Allocator, io: std.Io, path: []const u8, d: *const Data) anyer
 // Reader (timed) and harness
 // ---------------------------------------------------------------------------
 
-fn readAll(a: Allocator, io: std.Io, path: []const u8) anyerror!usize {
+fn readAll(a: Allocator, io: std.Io, path: []const u8, comptime streaming: bool) anyerror!usize {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var reader = try parquet.openFileDynamic(a, file, io, .{});
     defer reader.deinit();
-    var it = reader.rowIterator();
+    var it = if (streaming) reader.rowIteratorStreaming() else reader.rowIterator();
     defer it.deinit();
     var n: usize = 0;
     while (try it.next()) |row| {
@@ -216,7 +217,9 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
 
     var best_write: i96 = std.math.maxInt(i96);
     var best_read: i96 = std.math.maxInt(i96);
+    var best_stream: i96 = std.math.maxInt(i96);
     var read_rows: usize = 0;
+    var stream_rows: usize = 0;
     for (0..runs) |_| {
         const w0 = std.Io.Timestamp.now(io, .awake);
         try sc.write(gpa, io, path, &data);
@@ -230,16 +233,20 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
         }
 
         const r0 = std.Io.Timestamp.now(io, .awake);
-        read_rows = try readAll(gpa, io, path);
+        read_rows = try readAll(gpa, io, path, false);
         best_read = @min(best_read, r0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
+
+        const s0 = std.Io.Timestamp.now(io, .awake);
+        stream_rows = try readAll(gpa, io, path, true);
+        best_stream = @min(best_stream, s0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds);
     }
-    if (read_rows != rows) return error.RowCountMismatch;
+    if (read_rows != rows or stream_rows != rows) return error.RowCountMismatch;
 
     const size = try fileSize(io, path);
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
     const mb = @as(f64, @floatFromInt(size)) / (1024.0 * 1024.0);
-    try out.print("{s:<14} {d:>9} {d:>10.2} {d:>14.0} {d:>10.2} {d:>14.0} {d:>9.2}\n", .{
+    try out.print("{s:<14} {d:>9} {d:>10.2} {d:>14.0} {d:>10.2} {d:>14.0} {d:>9.2} {d:>15.2} {d:>23.0}\n", .{
         sc.name,
         rows,
         @as(f64, @floatFromInt(best_write)) / 1e6,
@@ -247,6 +254,8 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
         @as(f64, @floatFromInt(best_read)) / 1e6,
         rowsPerSec(rows, best_read),
         mb,
+        @as(f64, @floatFromInt(best_stream)) / 1e6,
+        rowsPerSec(rows, best_stream),
     });
     try out.flush();
 }
@@ -262,7 +271,7 @@ pub fn main(init: std.process.Init) anyerror!void {
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
     const out = &stdout_writer.interface;
 
-    try out.print("scenario        rows    write_ms  write_rows_per_s    read_ms  read_rows_per_s   file_MB\n", .{});
+    try out.print("scenario        rows    write_ms  write_rows_per_s    read_ms  read_rows_per_s   file_MB  read_stream_ms  read_stream_rows_per_s\n", .{});
     try out.flush();
 
     try std.Io.Dir.cwd().createDirPath(io, bench_dir);

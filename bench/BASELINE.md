@@ -49,3 +49,12 @@ with the Phase 1 compat changes.
 | str_dict | 12,271,444 | 10,585,214 | 12,591,017 |
 | str_unique | 14,884,718 | 10,756,713 | 14,410,842 |
 | mixed5 | 5,490,189 | 5,073,574 | 4,861,038 |
+
+## Notes
+
+- From commit 0ed9219 the bench prints two more columns, `read_stream_ms` and
+  `read_stream_rows_per_s`: the same read done with `DynamicReader.rowIteratorStreaming()` (one
+  reused row, valid until the next `next()`). `read_ms` / `read_rows_per_s` still use
+  `rowIterator()` and remain the compatibility number compared in the tables above. The streaming
+  read runs right after the `rowIterator()` read in each of the 3 runs, and its best time is
+  reported. Its rows/s are not comparable to the history tables' read column.
