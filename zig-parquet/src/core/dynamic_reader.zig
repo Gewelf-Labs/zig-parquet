@@ -290,7 +290,7 @@ pub const DynamicReader = struct {
 
                 if (self.current_rg >= self.num_rgs) return null;
 
-                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices);
+                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices, null);
                 self.current_rg += 1;
 
                 if (rows.len > 0) {
@@ -344,14 +344,14 @@ pub const DynamicReader = struct {
 
     /// Read all rows from a row group as dynamic Value types
     pub fn readAllRows(self: *Self, row_group_index: usize) ![]Row {
-        return self.readRowsInternal(row_group_index, null);
+        return self.readRowsInternal(row_group_index, null, null);
     }
 
     /// Read rows from a row group, returning only the specified top-level columns.
     /// Column indices refer to top-level schema columns (not leaf columns).
     /// Returned rows contain values in dense order matching the projection list.
     pub fn readRowsProjected(self: *Self, row_group_index: usize, col_indices: []const usize) ![]Row {
-        return self.readRowsInternal(row_group_index, col_indices);
+        return self.readRowsInternal(row_group_index, col_indices, null);
     }
 
     /// Read rows from a row group, applying page-index-driven filters to skip
@@ -535,10 +535,15 @@ pub const DynamicReader = struct {
         }
 
         // Assemble flat rows from the kept per-column values.
-        return self.assembleFlatRows(canonical.len, num_leaf_columns, column_values, null);
+        return self.assembleFlatRows(canonical.len, num_leaf_columns, column_values, null, null);
     }
 
-    fn readRowsInternal(self: *Self, row_group_index: usize, col_indices: ?[]const usize) ![]Row {
+    fn readRowsInternal(
+        self: *Self,
+        row_group_index: usize,
+        col_indices: ?[]const usize,
+        rows_arena: ?*std.heap.ArenaAllocator,
+    ) ![]Row {
         if (row_group_index >= self.metadata.row_groups.len) {
             return try self.allocator.alloc(Row, 0);
         }
@@ -668,9 +673,10 @@ pub const DynamicReader = struct {
             column_rep_levels[col_idx] = result.rep_levels;
         }
 
-        // Assemble rows
-        if (is_flat) {
-            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, col_indices);
+        // Without nested columns every top-level column is exactly one leaf at the
+        // same index (leaf_start == top index), so the flat assembler applies.
+        if (is_flat or (!any_nested and num_leaf_columns == num_top)) {
+            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, col_indices, rows_arena);
         }
         return self.assembleNestedRows(
             num_rows,
@@ -1134,6 +1140,7 @@ pub const DynamicReader = struct {
         num_columns: usize,
         column_values: [][]Value,
         projected_col_indices: ?[]const usize,
+        rows_arena: ?*std.heap.ArenaAllocator,
     ) ![]Row {
         const output_indices = projected_col_indices orelse blk: {
             const all = try self.allocator.alloc(usize, num_columns);
@@ -1144,30 +1151,28 @@ pub const DynamicReader = struct {
 
         const num_output_cols = output_indices.len;
         const rows = try self.allocator.alloc(Row, num_rows);
-        var rows_initialized: usize = 0;
-        errdefer {
-            for (rows[0..rows_initialized]) |row| row.deinit();
-            self.allocator.free(rows);
+        errdefer self.allocator.free(rows);
+
+        // Flat values are scalars or byte slices owned by the reader's bytes arena
+        // (bytes_arena_allocator is set for the whole read), so cells are moved, not
+        // cloned. The caller's `column_values` cleanup then frees only the arrays.
+        if (rows_arena) |arena| {
+            const cells = std.math.mul(usize, num_rows, num_output_cols) catch return error.OutOfMemory;
+            const block = try arena.allocator().alloc(Value, cells);
+            for (rows, 0..) |*row, r| {
+                const vals = block[r * num_output_cols ..][0..num_output_cols];
+                fillFlatRow(vals, column_values, output_indices, r);
+                row.* = .{ .values = vals, .allocator = self.allocator, .bytes_borrowed = true, .values_borrowed = true };
+            }
+            return rows;
         }
 
-        for (0..num_rows) |row_idx| {
-            const values = try self.allocator.alloc(Value, num_output_cols);
-            var vals_initialized: usize = 0;
-            errdefer {
-                for (values[0..vals_initialized]) |val| val.deinit(self.allocator);
-                self.allocator.free(values);
-            }
-
-            for (output_indices, 0..) |col_idx, out_idx| {
-                if (row_idx < column_values[col_idx].len) {
-                    values[out_idx] = try cloneValue(self.allocator, column_values[col_idx][row_idx]);
-                } else {
-                    values[out_idx] = .{ .null_val = {} };
-                }
-                vals_initialized += 1;
-            }
-
-            rows[row_idx] = .{ .values = values, .allocator = self.allocator, .bytes_borrowed = true };
+        var rows_initialized: usize = 0;
+        errdefer for (rows[0..rows_initialized]) |row| row.deinit();
+        for (rows, 0..) |*row, r| {
+            const vals = try self.allocator.alloc(Value, num_output_cols);
+            fillFlatRow(vals, column_values, output_indices, r);
+            row.* = .{ .values = vals, .allocator = self.allocator, .bytes_borrowed = true };
             rows_initialized += 1;
         }
         return rows;
@@ -1202,6 +1207,15 @@ pub const DynamicReader = struct {
         mutable_header.deinit(self.allocator);
     }
 };
+
+/// Move row `row` of each projected column into `dst` (no cloning). Missing
+/// trailing values in a column become null.
+fn fillFlatRow(dst: []Value, column_values: []const []Value, output_indices: []const usize, row: usize) void {
+    for (output_indices, dst) |col_idx, *d| {
+        const col = column_values[col_idx];
+        d.* = if (row < col.len) col[row] else .{ .null_val = {} };
+    }
+}
 
 /// Clone a Value, allocating new memory for any heap data
 fn cloneValue(allocator: std.mem.Allocator, v: Value) !Value {

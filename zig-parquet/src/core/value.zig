@@ -285,6 +285,9 @@ pub const Row = struct {
     /// NOT be freed per-value. List/map/struct container slices and
     /// struct field names are still freed through `allocator`.
     bytes_borrowed: bool = false,
+    /// When true, `values` is part of a block owned by the producer (e.g. a
+    /// `RowIterator` arena) and is not freed by `deinit`.
+    values_borrowed: bool = false,
 
     /// Get the value for a specific column index
     pub fn getColumn(self: Row, col_idx: usize) ?Value {
@@ -311,7 +314,7 @@ pub const Row = struct {
     pub fn deinit(self: Row) void {
         const opts: Value.DeinitOptions = .{ .skip_bytes = self.bytes_borrowed };
         for (self.values) |v| v.deinitWithOptions(self.allocator, opts);
-        self.allocator.free(self.values);
+        if (!self.values_borrowed) self.allocator.free(self.values);
     }
 };
 
