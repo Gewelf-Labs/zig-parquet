@@ -565,56 +565,23 @@ pub const DynamicReader = struct {
             return try self.allocator.alloc(Row, 0);
         }
 
-        const schema = self.metadata.schema;
-        const num_top: usize = if (schema.len > 0)
-            safe.castTo(usize, schema[0].num_children orelse 0) catch 0
-        else
-            0;
+        // Read needed leaf columns into fixed-size arrays
+        const column_values = try self.allocator.alloc([]Value, num_leaf_columns);
+        @memset(column_values, &.{});
+        defer self.freeColumnValues(column_values);
 
-        const is_flat = num_top == 0;
-        const num_top_columns = if (is_flat) num_leaf_columns else num_top;
-
-        // Validate projection indices
-        if (col_indices) |indices| {
-            for (indices) |idx| {
-                if (idx >= num_top_columns) return error.InvalidArgument;
-            }
+        // Flat read (also validates `col_indices`): every requested column is
+        // one primitive leaf, so no levels are kept and cells are moved.
+        if (try self.planFlatLeaves(num_leaf_columns, col_indices)) |leaves| {
+            defer self.allocator.free(leaves);
+            try self.readFlatColumns(row_group_index, leaves, column_values);
+            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, leaves, rows_arena);
         }
 
-        // Compute top-level-to-leaf mapping for nested schemas
+        // Nested read: compute the top-level-to-leaf mapping.
         var schema_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer schema_arena.deinit();
-        const sa = schema_arena.allocator();
-
-        const top_infos = if (!is_flat) blk: {
-            const infos = try self.allocator.alloc(TopColInfo, num_top);
-            errdefer self.allocator.free(infos);
-
-            var schema_idx: usize = 1;
-            var leaf_offset: usize = 0;
-            for (0..num_top) |top_idx| {
-                if (schema_idx >= schema.len) return error.InvalidSchema;
-                const build_result = try schema_mod.SchemaNode.buildFromElements(sa, schema, schema_idx);
-                const lc = build_result.node.countLeafColumns();
-                infos[top_idx] = .{
-                    .leaf_start = leaf_offset,
-                    .leaf_count = lc,
-                    .is_nested = lc > 1 or !build_result.node.unwrapOptional().isPrimitive(),
-                    .schema_node = build_result.node,
-                };
-                schema_idx = build_result.next_idx;
-                leaf_offset += lc;
-            }
-            break :blk infos;
-        } else null;
-        defer if (top_infos) |ti| self.allocator.free(ti);
-
-        // Levels are only needed when at least one requested column is nested.
-        const any_nested = blk: {
-            const infos = top_infos orelse break :blk false;
-            for (infos) |info| if (info.is_nested) break :blk true;
-            break :blk false;
-        };
+        const top_infos = try self.buildTopInfos(schema_arena.allocator());
 
         // Build set of leaf columns to read
         const leaf_needed = try self.allocator.alloc(bool, num_leaf_columns);
@@ -622,29 +589,14 @@ pub const DynamicReader = struct {
 
         if (col_indices) |indices| {
             @memset(leaf_needed, false);
-            if (is_flat) {
-                for (indices) |idx| leaf_needed[idx] = true;
-            } else {
-                for (indices) |top_idx| {
-                    const info = top_infos.?[top_idx];
-                    for (info.leaf_start..info.leaf_start + info.leaf_count) |leaf| {
-                        if (leaf < num_leaf_columns) leaf_needed[leaf] = true;
-                    }
+            for (indices) |top_idx| {
+                const info = top_infos[top_idx];
+                for (info.leaf_start..info.leaf_start + info.leaf_count) |leaf| {
+                    if (leaf < num_leaf_columns) leaf_needed[leaf] = true;
                 }
             }
         } else {
             @memset(leaf_needed, true);
-        }
-
-        // Read needed leaf columns into fixed-size arrays
-        const column_values = try self.allocator.alloc([]Value, num_leaf_columns);
-        @memset(column_values, &.{});
-        defer {
-            for (column_values) |vals| {
-                for (vals) |v| v.deinit(self.allocator);
-                if (vals.len > 0) self.allocator.free(vals);
-            }
-            self.allocator.free(column_values);
         }
 
         const column_def_levels = try self.allocator.alloc(?[]u32, num_leaf_columns);
@@ -667,26 +619,108 @@ pub const DynamicReader = struct {
 
         for (0..num_leaf_columns) |col_idx| {
             if (!leaf_needed[col_idx]) continue;
-            const result = try self.readColumnDynamic(col_idx, row_group_index, any_nested);
+            const result = try self.readColumnDynamic(col_idx, row_group_index, true);
             column_values[col_idx] = result.values;
             column_def_levels[col_idx] = result.def_levels;
             column_rep_levels[col_idx] = result.rep_levels;
         }
 
-        // Without nested columns every top-level column is exactly one leaf at the
-        // same index (leaf_start == top index), so the flat assembler applies.
-        if (is_flat or (!any_nested and num_leaf_columns == num_top)) {
-            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, col_indices, rows_arena);
-        }
         return self.assembleNestedRows(
             num_rows,
             num_leaf_columns,
             column_values,
             column_def_levels,
             column_rep_levels,
-            top_infos.?,
+            top_infos,
             col_indices,
         );
+    }
+
+    /// Number of top-level columns declared by the schema root (0 when the
+    /// root declares none; leaves are then the top-level columns).
+    fn numTopColumns(self: *const Self) usize {
+        const schema = self.metadata.schema;
+        return if (schema.len > 0)
+            safe.castTo(usize, schema[0].num_children orelse 0) catch 0
+        else
+            0;
+    }
+
+    /// Top-level-to-leaf mapping for a schema with `numTopColumns() > 0`.
+    /// Infos and schema nodes are allocated in `sa`.
+    fn buildTopInfos(self: *const Self, sa: std.mem.Allocator) ![]TopColInfo {
+        const schema = self.metadata.schema;
+        const infos = try sa.alloc(TopColInfo, self.numTopColumns());
+        var schema_idx: usize = 1;
+        var leaf_offset: usize = 0;
+        for (infos) |*info| {
+            if (schema_idx >= schema.len) return error.InvalidSchema;
+            const build_result = try schema_mod.SchemaNode.buildFromElements(sa, schema, schema_idx);
+            const lc = build_result.node.countLeafColumns();
+            info.* = .{
+                .leaf_start = leaf_offset,
+                .leaf_count = lc,
+                .is_nested = lc > 1 or !build_result.node.unwrapOptional().isPrimitive(),
+                .schema_node = build_result.node,
+            };
+            schema_idx = build_result.next_idx;
+            leaf_offset += lc;
+        }
+        return infos;
+    }
+
+    /// Validate `col_indices` (top-level columns). When every requested column
+    /// is a single primitive leaf present in the row group, return the leaf
+    /// index of each output column (caller frees); return null when the read
+    /// needs nested assembly. Only the requested columns are considered.
+    fn planFlatLeaves(self: *const Self, num_leaf_columns: usize, col_indices: ?[]const usize) !?[]usize {
+        const num_top = self.numTopColumns();
+        const is_flat = num_top == 0;
+        const num_top_columns = if (is_flat) num_leaf_columns else num_top;
+        if (col_indices) |indices| {
+            for (indices) |idx| {
+                if (idx >= num_top_columns) return error.InvalidArgument;
+            }
+        }
+
+        const leaves = try self.allocator.alloc(usize, if (col_indices) |c| c.len else num_top_columns);
+        errdefer self.allocator.free(leaves);
+        for (leaves, 0..) |*l, i| l.* = if (col_indices) |c| c[i] else i;
+        if (is_flat) return leaves;
+
+        var schema_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer schema_arena.deinit();
+        const top_infos = try self.buildTopInfos(schema_arena.allocator());
+        for (leaves) |*l| {
+            const info = top_infos[l.*];
+            if (info.is_nested or info.leaf_start >= num_leaf_columns) {
+                self.allocator.free(leaves);
+                return null;
+            }
+            l.* = info.leaf_start;
+        }
+        return leaves;
+    }
+
+    /// Decode each leaf in `leaves` into `column_values[leaf]`, dropping levels.
+    /// The caller owns `column_values` (pre-filled with empty slices) and frees
+    /// it on error as well.
+    fn readFlatColumns(self: *Self, row_group_index: usize, leaves: []const usize, column_values: [][]Value) !void {
+        for (leaves) |leaf| {
+            if (column_values[leaf].len > 0) continue; // projected more than once
+            const result = try self.readColumnDynamic(leaf, row_group_index, false);
+            // keep_levels = false, so no level arrays are returned.
+            std.debug.assert(result.def_levels == null and result.rep_levels == null);
+            column_values[leaf] = result.values;
+        }
+    }
+
+    fn freeColumnValues(self: *Self, column_values: [][]Value) void {
+        for (column_values) |vals| {
+            for (vals) |v| v.deinit(self.allocator);
+            if (vals.len > 0) self.allocator.free(vals);
+        }
+        self.allocator.free(column_values);
     }
 
     /// Read a single column dynamically

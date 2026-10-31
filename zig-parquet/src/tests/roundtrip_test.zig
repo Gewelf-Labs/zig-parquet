@@ -4191,6 +4191,56 @@ test "rowIteratorProjected only returns projected columns" {
     try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
 }
 
+/// struct{name: string, qty: int32} "item" (2 leaves), then flat int64 "id"
+/// and string "s", 3 rows. The flat columns' leaf indices (2, 3) differ from
+/// their top-level indices (1, 2).
+fn writeNestedThenFlat(allocator: std.mem.Allocator) ![]u8 {
+    var rw = try parquet.createBufferDynamic(allocator);
+    defer rw.deinit();
+
+    const fields = try rw.allocSchemaFields(2);
+    fields[0] = .{ .name = "name", .node = try rw.allocSchemaNode(.{ .byte_array = .{ .logical = .string } }) };
+    fields[1] = .{ .name = "qty", .node = try rw.allocSchemaNode(.{ .int32 = .{} }) };
+    try rw.addColumnNested("item", try rw.allocSchemaNode(.{ .struct_ = .{ .fields = fields } }), .{});
+    try rw.addColumn("id", TypeInfo.int64, .{});
+    try rw.addColumn("s", TypeInfo.string, .{});
+    try rw.begin();
+
+    for (nested_then_flat_names, 0..) |name, i| {
+        try rw.beginStruct(0);
+        try rw.setStructFieldBytes(0, 0, name);
+        try rw.setStructField(0, 1, .{ .int32_val = @as(i32, @intCast(i)) });
+        try rw.endStruct(0);
+        try rw.setInt64(1, @as(i64, @intCast(i)) * 100);
+        try rw.setBytes(2, name);
+        try rw.addRow();
+    }
+
+    try rw.close();
+    return rw.toOwnedSlice();
+}
+
+const nested_then_flat_names = [_][]const u8{ "apple", "banana", "cherry" };
+
+test "readRowsProjected flat columns after a nested column use leaf indices" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    const rows = try reader.readRowsProjected(0, &.{ 2, 1 });
+    defer deferFreeRows(allocator, rows);
+
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows, 0..) |row, i| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqualStrings(nested_then_flat_names[i], row.getColumn(0).?.asBytes().?);
+        try std.testing.expectEqual(@as(i64, @intCast(i)) * 100, row.getColumn(1).?.asInt64().?);
+    }
+}
+
 test "rowIterator on empty file returns null immediately" {
     const allocator = std.testing.allocator;
 
