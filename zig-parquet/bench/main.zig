@@ -210,7 +210,9 @@ fn runScenario(gpa: Allocator, io: std.Io, out: *std.Io.Writer, sc: Scenario, ro
     const data = try sc.build(arena.allocator(), rows);
 
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}.parquet", .{ bench_dir, sc.name });
+    // Per-run suffix so concurrent bench processes never share a file.
+    const tag: u64 = @bitCast(@as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds))); // low 64 bits only; uniqueness, not time
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}-{x}.parquet", .{ bench_dir, sc.name, tag });
 
     var best_write: i96 = std.math.maxInt(i96);
     var best_read: i96 = std.math.maxInt(i96);
