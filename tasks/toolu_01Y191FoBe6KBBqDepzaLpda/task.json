@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01Y191FoBe6KBBqDepzaLpda",
+  "agent_id": "af1a75365f243ce8b",
+  "task_description": "Haiku: review fixes decoder/rle",
+  "token_usage": {
+    "input_tokens": 26,
+    "cache_creation_tokens": 123909,
+    "cache_read_tokens": 1013403,
+    "output_tokens": 20233,
+    "api_call_count": 13
+  },
+  "started_at": "2026-10-30T21:16:02.7566951-04:00",
+  "completed_at": "2026-10-30T21:26:57.4077332-04:00"
+}
