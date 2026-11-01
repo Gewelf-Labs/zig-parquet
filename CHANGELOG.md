@@ -30,6 +30,7 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - `Row.values_borrowed` flag (default `false`) for rows whose value block is owned by the producer.
 - `StreamingRowIterator` is exported from the package root.
 - `make bench` target (zig-only, ReleaseFast; `ROWS=<n>` sets the row count).
+- Comparison benchmarks: `make bench-rust` (Rust `parquet` crate) and `make bench-js-browsers` / `make bench-js-workerd` (zig-parquet WASM vs hyparquet and parquet-wasm in Chrome, Firefox and workerd). Results in `bench/COMPARE.md`.
 - `ZIG=<path>` on any Makefile target selects the Zig toolchain.
 
 ### Changed

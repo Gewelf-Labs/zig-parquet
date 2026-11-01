@@ -35,6 +35,10 @@ help:
 	@echo "  make example NAME=...  Build an example (honors CODECS, OPT)"
 	@echo "  make wasm              Verify WASM targets compile and link (no C codecs unless CODECS is set)"
 	@echo "  make bench [ROWS=n]    Run the benchmark harness (ReleaseFast, zig-only codecs by default)"
+	@echo "  make bench-rust [ROWS=n]  Same scenarios with the Rust parquet crate (bench/rust)"
+	@echo "  make bench-wasm        Build zig-out/bin/zpbench.wasm for the JS benchmarks in bench/js"
+	@echo "  make bench-js-browsers [ROWS=n]  zig-parquet WASM vs hyparquet and parquet-wasm in Chrome and Firefox"
+	@echo "  make bench-js-workerd [ROWS=n]   The same in workerd"
 	@echo "  make validate-wild     Validate pqi against wild files (failures only)"
 	@echo "  make validate-wild-all Validate pqi against wild files (show all)"
 	@echo "  make fmt               zig fmt across sources (requires ZIG=<0.16 zig>)"
@@ -91,6 +95,21 @@ wasm:
 .PHONY: bench
 bench:
 	cd $(LIB_DIR) && $(ZIG) build bench $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -Doptimize=ReleaseFast $(if $(ROWS),-- $(ROWS))
+
+.PHONY: bench-wasm
+bench-wasm:
+	cd $(LIB_DIR) && $(ZIG) build bench-wasm $(call zcache,..) -Dcodecs=none -Doptimize=$(or $(OPT),ReleaseFast)
+
+.PHONY: bench-rust
+bench-rust:
+	cd bench/rust && cargo run --release $(if $(ROWS),-- $(ROWS))
+
+.PHONY: bench-js-browsers bench-js-workerd
+bench-js-browsers: bench-wasm
+	cd bench/js && (test -d node_modules || npm ci) && node run-browsers.mjs $(or $(ROWS),1000000)
+
+bench-js-workerd: bench-wasm
+	cd bench/js && (test -d node_modules || npm ci) && node run-workerd.mjs $(or $(ROWS),1000000)
 
 .PHONY: validate-wild
 validate-wild: cli

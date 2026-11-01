@@ -128,23 +128,7 @@ pub fn build(b: *std.Build) void {
             .os_tag = .freestanding,
         });
 
-        const freestanding_opts = b.addOptions();
-        freestanding_opts.addOption(bool, "enable_zstd", false);
-        freestanding_opts.addOption(bool, "enable_zig_zstd", false);
-        freestanding_opts.addOption(bool, "supports_zstd", false);
-        freestanding_opts.addOption(bool, "enable_snappy", false);
-        freestanding_opts.addOption(bool, "enable_zig_snappy", false);
-        freestanding_opts.addOption(bool, "supports_snappy", false);
-        freestanding_opts.addOption(bool, "enable_gzip", false);
-        freestanding_opts.addOption(bool, "enable_zig_gzip", false);
-        freestanding_opts.addOption(bool, "supports_gzip", false);
-        freestanding_opts.addOption(bool, "enable_lz4", false);
-        freestanding_opts.addOption(bool, "enable_zig_lz4", false);
-        freestanding_opts.addOption(bool, "supports_lz4", false);
-        freestanding_opts.addOption(bool, "enable_brotli", false);
-        freestanding_opts.addOption(bool, "enable_zig_brotli", false);
-        freestanding_opts.addOption(bool, "supports_brotli", false);
-        freestanding_opts.addOption([]const u8, "version", zon.version);
+        const freestanding_opts = noCodecOptions(b);
 
         const freestanding_mod = b.addModule("parquet_freestanding", .{
             .root_source_file = b.path("src/lib.zig"),
@@ -207,6 +191,28 @@ pub fn build(b: *std.Build) void {
         const bench_run = b.addRunArtifact(bench_exe);
         passArgs(b, bench_run);
         b.step("bench", "Build and run the benchmark harness").dependOn(&bench_run.step);
+    }
+
+    // WASM benchmark module for the JS harness in ../bench/js: zig build bench-wasm
+    {
+        const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+        const pq = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        });
+        pq.addImport("build_options", noCodecOptions(b).createModule());
+        const mod = b.createModule(.{
+            .root_source_file = b.path("bench/wasm.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+            .strip = true, // benchmark build: debug info only inflates the download
+        });
+        mod.addImport("parquet", pq);
+        const exe = b.addExecutable(.{ .name = "zpbench", .root_module = mod });
+        exe.entry = .disabled;
+        exe.rdynamic = true;
+        b.step("bench-wasm", "Build the WASM benchmark module (zpbench.wasm)").dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
     // WASM smoke test: compile both WASM targets (no codecs) to verify exports link
@@ -515,6 +521,18 @@ const zlib_sources = &[_][]const u8{
 };
 
 /// Forward `zig build <step> -- args...` on Zig 0.16 (`b.args`) and 0.17 (`addPassthruArgs`).
+/// build_options for wasm32-freestanding builds: no compression codecs.
+fn noCodecOptions(b: *std.Build) *std.Build.Step.Options {
+    const opts = b.addOptions();
+    inline for (.{ "zstd", "snappy", "gzip", "lz4", "brotli" }) |c| {
+        opts.addOption(bool, "enable_" ++ c, false);
+        opts.addOption(bool, "enable_zig_" ++ c, false);
+        opts.addOption(bool, "supports_" ++ c, false);
+    }
+    opts.addOption([]const u8, "version", zon.version);
+    return opts;
+}
+
 fn passArgs(b: *std.Build, run: *std.Build.Step.Run) void {
     if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
         run.addPassthruArgs();

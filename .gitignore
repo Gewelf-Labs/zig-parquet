@@ -14,3 +14,8 @@ zig-out/
 __pycache__/
 *.py[cod]
 .zig17/
+
+# Benchmarks
+bench/rust/target/
+bench/js/node_modules/
+bench/js/dist/
