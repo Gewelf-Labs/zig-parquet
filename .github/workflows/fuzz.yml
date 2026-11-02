@@ -1,0 +1,86 @@
+name: Fuzz (manual)
+
+# Manual only: never runs on push, pull request or a schedule. Start it from the Actions tab
+# ("Run workflow") when you want a CI fuzz campaign. Local runs cost nothing: see HARDENING.md
+# "Fuzzing and regressions". Findings: download the artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "60"
+      coverage_guided:
+        description: Also run the coverage-guided fuzzer (2 extra jobs)
+        type: boolean
+        default: false
+
+jobs:
+  mutation:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [file, file-oom, page, encoding, thrift, codec]
+    runs-on: ubuntu-latest
+    name: fuzz ${{ matrix.target }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Generate test files
+        working-directory: test-files-arrow
+        run: uv run python generate.py
+
+      - name: Fuzz
+        run: make fuzz-run TARGET=${{ matrix.target }} SECONDS=${{ inputs.seconds }} SEED=${{ github.run_id }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: zig-parquet/.fuzz-out/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  coverage-guided:
+    if: ${{ inputs.coverage_guided }}
+    strategy:
+      fail-fast: false
+      matrix:
+        zig: [0.16.0, 0.17.0]
+    runs-on: ubuntu-latest
+    name: fuzz-cov (zig ${{ matrix.zig }})
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Generate test files
+        working-directory: test-files-arrow
+        run: uv run python generate.py
+
+      - name: Coverage-guided fuzzing (ReleaseSafe)
+        run: make fuzz-cov N=2M
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-cov-${{ matrix.zig }}
+          path: zig-parquet/.fuzz-out
+          if-no-files-found: ignore
