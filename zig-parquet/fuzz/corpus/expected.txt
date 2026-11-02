@@ -12,3 +12,4 @@ thrift/regress-20261102-columnindex-repeat-2.bin error.EndOfData
 thrift/regress-20261102-offsetindex-repeat.bin error.EndOfData
 thrift/regress-20261102-pageheader-error-path.bin error.EndOfData
 codec/regress-20261102-gzip-cl-tree-overflow.bin ok
+codec/regress-20261102-brotli-cl-length-overrun.bin error.DecompressionError
