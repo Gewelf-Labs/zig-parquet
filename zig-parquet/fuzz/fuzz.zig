@@ -8,6 +8,7 @@
 //! same `runOne` backs the std.testing.fuzz tests at the bottom (`zig build fuzz-cov --fuzz=N`,
 //! Linux/macOS) and the corpus replay in `zig build test`.
 const std = @import("std");
+const build_options = @import("build_options");
 const common = @import("common.zig");
 const t_file = @import("t_file.zig");
 const t_page = @import("t_page.zig");
@@ -548,6 +549,11 @@ test "fuzz corpus expectations" {
         var fields = std.mem.tokenizeAny(u8, line, " \t");
         const path = fields.next() orelse continue;
         const want = fields.next() orelse return error.BadExpectation;
+        if (fields.next()) |needs| {
+            if (!std.mem.startsWith(u8, needs, "needs=")) return error.BadExpectation;
+            const built = codecBuilt(needs["needs=".len..]) orelse return error.BadExpectation;
+            if (!built) continue;
+        }
         const slash = std.mem.indexOfScalar(u8, path, '/') orelse return error.BadExpectation;
         const target = std.meta.stringToEnum(Target, path[0..slash]) orelse return error.BadExpectation;
         const full = try std.fs.path.join(gpa, &.{ corpus_root, path });
@@ -589,6 +595,18 @@ test "fuzz corpus expectations" {
             }
         }
     }
+}
+
+/// Whether the named codec is compiled in; null for an unknown name.
+fn codecBuilt(name: []const u8) ?bool {
+    const Codec = enum { gzip, brotli, snappy, lz4, zstd };
+    return switch (std.meta.stringToEnum(Codec, name) orelse return null) {
+        .gzip => build_options.supports_gzip,
+        .brotli => build_options.supports_brotli,
+        .snappy => build_options.supports_snappy,
+        .lz4 => build_options.supports_lz4,
+        .zstd => build_options.supports_zstd,
+    };
 }
 
 fn hasExpectation(text: []const u8, key: []const u8) bool {

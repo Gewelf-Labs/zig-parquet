@@ -39,7 +39,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    parquet_mod.addImport("build_options", build_options.createModule());
+    const build_options_mod = build_options.createModule();
+    parquet_mod.addImport("build_options", build_options_mod);
 
     // Library artifact
     const lib = b.addLibrary(.{
@@ -201,7 +202,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         fuzz_mod.addImport("parquet", parquet_mod);
-        fuzz_mod.addImport("build_options", build_options.createModule());
+        fuzz_mod.addImport("build_options", build_options_mod); // the same module parquet imports, or Zig sees the file twice
         const fuzz_exe = b.addExecutable(.{ .name = "zp-fuzz", .root_module = fuzz_mod });
         const fuzz_run = b.addRunArtifact(fuzz_exe);
         passArgs(b, fuzz_run);
