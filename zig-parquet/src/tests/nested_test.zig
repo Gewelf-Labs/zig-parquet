@@ -1271,7 +1271,6 @@ test "parquet round-trip: TIMESTAMP logical type" {
         try writer.close();
     }
 
-
     // Read back and verify
     {
         var reader = parquet.openFileDynamic(allocator, file, io, .{}) catch |err| {
@@ -1366,7 +1365,6 @@ test "parquet round-trip: TIME logical type" {
         try writer.close();
     }
 
-
     // Read back and verify
     {
         var reader = parquet.openFileDynamic(allocator, file, io, .{}) catch |err| {
@@ -1459,7 +1457,6 @@ test "parquet round-trip: DECIMAL logical type" {
         try writer.writeNestedColumn(0, &rows);
         try writer.close();
     }
-
 
     // Read back and verify
     {
@@ -1557,7 +1554,6 @@ test "parquet round-trip: INT logical types (INT8, INT16, UINT32)" {
         try writer.close();
     }
 
-
     // Read back and verify
     {
         var reader = parquet.openFileDynamic(allocator, file, io, .{}) catch |err| {
@@ -1651,7 +1647,6 @@ test "parquet round-trip: JSON logical type" {
         try writer.close();
     }
 
-
     // Read back and verify
     {
         var reader = parquet.openFileDynamic(allocator, file, io, .{}) catch |err| {
@@ -1725,7 +1720,6 @@ test "parquet round-trip: UUID logical type" {
         try writer.writeNestedColumn(0, &rows);
         try writer.close();
     }
-
 
     // Read back and verify
     {
@@ -1813,7 +1807,6 @@ test "parquet round-trip: ENUM logical type" {
         try writer.close();
     }
 
-
     // Read back and verify
     {
         var reader = parquet.openFileDynamic(allocator, file, io, .{}) catch |err| {
@@ -1867,7 +1860,7 @@ test "parquet round-trip: list with logical types" {
         defer writer.deinit();
 
         const row1_items = [_]Value{ .{ .bytes_val = "rust" }, .{ .bytes_val = "zig" }, .{ .bytes_val = "go" } };
-        const row2_items = [_]Value{ .{ .bytes_val = "python" } };
+        const row2_items = [_]Value{.{ .bytes_val = "python" }};
 
         const rows = [_]Value{
             .{ .list_val = &row1_items },
@@ -1877,7 +1870,6 @@ test "parquet round-trip: list with logical types" {
         try writer.writeNestedColumn(0, &rows);
         try writer.close();
     }
-
 
     // Read back and verify
     {

@@ -14,7 +14,6 @@
 
 const std = @import("std");
 
-
 /// Decode BYTE_STREAM_SPLIT encoded floats into pre-allocated buffer
 pub fn decodeFloat32Into(data: []const u8, result: []f32) !void {
     return decodeGenericInto(f32, data, result);
@@ -44,12 +43,12 @@ pub fn decodeFloat16Into(data: []const u8, result: []f16) !void {
 fn decodeGenericInto(comptime T: type, data: []const u8, result: []T) !void {
     const byte_width = @sizeOf(T);
     const num_values = result.len;
-    
+
     const required_generic = std.math.mul(usize, num_values, byte_width) catch return error.InsufficientData;
     if (data.len < required_generic) {
         return error.InsufficientData;
     }
-    
+
     // Each stream contains one byte from each value
     // Stream 0: all byte 0s, Stream 1: all byte 1s, etc.
     const streams: [byte_width][]const u8 = blk: {
@@ -61,7 +60,7 @@ fn decodeGenericInto(comptime T: type, data: []const u8, result: []T) !void {
         }
         break :blk s;
     };
-    
+
     // Reconstruct each value from its bytes
     for (0..num_values) |i| {
         var bytes: [@sizeOf(T)]u8 = undefined;
@@ -76,11 +75,11 @@ fn decodeGenericInto(comptime T: type, data: []const u8, result: []T) !void {
 fn decodeFixedLenInto(data: []const u8, result: [][]u8, type_length: usize) !void {
     const num_values = result.len;
     const required = std.math.mul(usize, num_values, type_length) catch return error.InsufficientData;
-    
+
     if (data.len < required) {
         return error.InsufficientData;
     }
-    
+
     // For fixed-length byte arrays, streams are organized similarly
     for (0..num_values) |i| {
         for (0..type_length) |j| {
@@ -176,10 +175,10 @@ test "byte stream split decode f32" {
         0x80, 0x00, 0x40, // stream 2
         0x3F, 0x40, 0x40, // stream 3
     };
-    
+
     var result: [3]f32 = undefined;
     try decodeFloat32Into(&data, &result);
-    
+
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), result[0], 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), result[1], 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), result[2], 0.0001);
@@ -187,7 +186,7 @@ test "byte stream split decode f32" {
 
 test "byte stream split decode f64" {
     const allocator = std.testing.allocator;
-    
+
     // 2 values: 1.0, 2.0
     // f64 1.0 = 0x3FF0000000000000 -> bytes: 00 00 00 00 00 00 F0 3F
     // f64 2.0 = 0x4000000000000000 -> bytes: 00 00 00 00 00 00 00 40
@@ -201,10 +200,10 @@ test "byte stream split decode f64" {
         0xF0, 0x00, // stream 6
         0x3F, 0x40, // stream 7
     };
-    
+
     const result = try decodeFloat64Alloc(allocator, &data, 2);
     defer allocator.free(result);
-    
+
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), result[0], 0.0001);
     try std.testing.expectApproxEqAbs(@as(f64, 2.0), result[1], 0.0001);
 }

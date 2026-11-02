@@ -21,8 +21,36 @@ pub const FileMetaData = struct {
 
     const Self = @This();
 
+    /// Free everything parse() allocated. Fields still at their defaults are skipped,
+    /// so this is safe on a partially filled value. Leaves `self` empty.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        freeSchema(allocator, self.schema);
+        freeRowGroups(allocator, self.row_groups);
+        if (self.key_value_metadata) |kvs| freeKeyValues(allocator, kvs);
+        if (self.created_by) |cb| allocator.free(cb);
+        self.* = .{};
+    }
+
+    // Free helpers shared by deinit and by the replace-on-duplicate-field paths in parse().
+    fn freeSchema(allocator: std.mem.Allocator, schema: []SchemaElement) void {
+        for (schema) |*elem| elem.deinit(allocator);
+        allocator.free(schema);
+    }
+
+    fn freeRowGroups(allocator: std.mem.Allocator, row_groups: []RowGroup) void {
+        for (row_groups) |*rg| rg.deinit(allocator);
+        allocator.free(row_groups);
+    }
+
+    fn freeKeyValues(allocator: std.mem.Allocator, kvs: []KeyValue) void {
+        for (kvs) |*kv| kv.deinit(allocator);
+        allocator.free(kvs);
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var meta = Self{};
+        // Frees whatever has been assigned to `meta` so far if a later field fails.
+        errdefer meta.deinit(allocator);
         reader.resetFieldTracking();
 
         while (try reader.readFieldHeader()) |field| {
@@ -30,30 +58,61 @@ pub const FileMetaData = struct {
                 1 => meta.version = try reader.readI32(),
                 2 => {
                     const list_header = try reader.readListHeader();
-                    var schema_list = try allocator.alloc(SchemaElement, list_header.size);
-                    for (0..list_header.size) |i| {
-                        schema_list[i] = try SchemaElement.parse(allocator, reader);
+                    try reader.checkListFits(list_header.size);
+                    const schema_list = try allocator.alloc(SchemaElement, list_header.size);
+                    var parsed: usize = 0;
+                    errdefer {
+                        for (schema_list[0..parsed]) |*elem| elem.deinit(allocator);
+                        allocator.free(schema_list);
                     }
+                    for (schema_list) |*slot| {
+                        slot.* = try SchemaElement.parse(allocator, reader);
+                        parsed += 1;
+                    }
+                    // A repeated field 2 replaces the earlier list; free it so it does not leak.
+                    freeSchema(allocator, meta.schema);
                     meta.schema = schema_list;
                 },
                 3 => meta.num_rows = try reader.readI64(),
                 4 => {
                     const list_header = try reader.readListHeader();
-                    var row_groups_list = try allocator.alloc(RowGroup, list_header.size);
-                    for (0..list_header.size) |i| {
-                        row_groups_list[i] = try RowGroup.parse(allocator, reader);
+                    try reader.checkListFits(list_header.size);
+                    const row_groups_list = try allocator.alloc(RowGroup, list_header.size);
+                    var parsed: usize = 0;
+                    errdefer {
+                        for (row_groups_list[0..parsed]) |*rg| rg.deinit(allocator);
+                        allocator.free(row_groups_list);
                     }
+                    for (row_groups_list) |*slot| {
+                        slot.* = try RowGroup.parse(allocator, reader);
+                        parsed += 1;
+                    }
+                    // A repeated field 4 replaces the earlier list; free it so it does not leak.
+                    freeRowGroups(allocator, meta.row_groups);
                     meta.row_groups = row_groups_list;
                 },
                 5 => {
                     const list_header = try reader.readListHeader();
-                    var kvs = try allocator.alloc(KeyValue, list_header.size);
-                    for (0..list_header.size) |i| {
-                        kvs[i] = try KeyValue.parse(allocator, reader);
+                    try reader.checkListFits(list_header.size);
+                    const kvs = try allocator.alloc(KeyValue, list_header.size);
+                    var parsed: usize = 0;
+                    errdefer {
+                        for (kvs[0..parsed]) |*kv| kv.deinit(allocator);
+                        allocator.free(kvs);
                     }
+                    for (kvs) |*slot| {
+                        slot.* = try KeyValue.parse(allocator, reader);
+                        parsed += 1;
+                    }
+                    // A repeated field 5 replaces the earlier list; free it so it does not leak.
+                    if (meta.key_value_metadata) |old| freeKeyValues(allocator, old);
                     meta.key_value_metadata = kvs;
                 },
-                6 => meta.created_by = try allocator.dupe(u8, try reader.readString()),
+                6 => {
+                    const cb = try allocator.dupe(u8, try reader.readString());
+                    if (meta.created_by) |old| allocator.free(old);
+                    meta.created_by = cb;
+                },
                 else => try reader.skip(field.field_type),
             }
         }

@@ -59,11 +59,9 @@ pub const DynamicReaderOptions = struct {
 /// Composed from categorized error sets — no more `SchemaParseError` coalescing.
 pub const DynamicReaderError = errors_mod.DynamicReaderError;
 
-const crc = std.hash.crc;
-
 /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
 fn computePageCrc(data: []const u8) i32 {
-    return @bitCast(crc.Crc32.hash(data));
+    return @bitCast(@import("crc32.zig").hash(data));
 }
 
 /// Safely cast i32 page size/count to usize, validating non-negative.
@@ -274,6 +272,9 @@ pub const DynamicReader = struct {
         current_rg: usize,
         num_rgs: usize,
         col_indices: ?[]const usize,
+        /// Backs the value slices of `current_rows` (flat reads). Reset when the
+        /// iterator moves past a row group; freed by `deinit`.
+        arena: std.heap.ArenaAllocator,
 
         /// Advance to the next row. Returns a pointer to the current row,
         /// or null when all row groups have been exhausted.
@@ -290,9 +291,14 @@ pub const DynamicReader = struct {
                     self.freeCurrentRows();
                 }
 
-                if (self.current_rg >= self.num_rgs) return null;
+                if (self.current_rg >= self.num_rgs) {
+                    // Exhausted: release the arena so iterating to the end
+                    // without deinit() leaks nothing.
+                    _ = self.arena.reset(.free_all);
+                    return null;
+                }
 
-                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices);
+                const rows = try self.reader.readRowsInternal(self.current_rg, self.col_indices, &self.arena);
                 self.current_rg += 1;
 
                 if (rows.len > 0) {
@@ -304,9 +310,10 @@ pub const DynamicReader = struct {
             }
         }
 
-        /// Free any currently held rows.
+        /// Free any currently held rows and the iterator arena.
         pub fn deinit(self: *RowIterator) void {
             self.freeCurrentRows();
+            self.arena.deinit();
         }
 
         fn freeCurrentRows(self: *RowIterator) void {
@@ -315,6 +322,7 @@ pub const DynamicReader = struct {
                 self.reader.allocator.free(rows);
                 self.current_rows = null;
             }
+            _ = self.arena.reset(.retain_capacity);
         }
     };
 
@@ -328,6 +336,7 @@ pub const DynamicReader = struct {
             .current_rg = 0,
             .num_rgs = self.metadata.row_groups.len,
             .col_indices = null,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
         };
     }
 
@@ -341,19 +350,143 @@ pub const DynamicReader = struct {
             .current_rg = 0,
             .num_rgs = self.metadata.row_groups.len,
             .col_indices = col_indices,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
+        };
+    }
+
+    /// Row iterator that builds each row on `next()` in one reused buffer, with
+    /// no per-row allocation.
+    ///
+    /// Contract: the row returned by `next()`, its `values` and any byte slices
+    /// inside them are valid only until the next call to `next()` or `deinit()`.
+    /// The next call overwrites them; copy anything you need to keep. Do not call
+    /// `deinit()` on the returned row.
+    ///
+    /// Memory is bounded by one row group: its decoded columns plus their byte
+    /// payloads, which live in an iterator arena reset at each row group. When a
+    /// requested column is nested, that row group is assembled whole, as by
+    /// `RowIterator` (same results, no speedup; byte payloads then live in the
+    /// reader's arena until the reader is deinitialized).
+    pub const StreamingRowIterator = struct {
+        reader: *Self,
+        col_indices: ?[]const usize,
+        current_rg: usize = 0,
+        cursor: usize = 0,
+        num_rows: usize = 0,
+        /// Flat row group: decoded columns indexed by leaf, the leaf of each
+        /// output column, and the reused row (`row.values` is the row buffer).
+        column_values: [][]Value = &.{},
+        leaves: []usize = &.{},
+        row: Row,
+        /// Nested row group: all of its rows.
+        fallback_rows: ?[]Row = null,
+        /// Byte payloads of the current flat row group.
+        arena: std.heap.ArenaAllocator,
+
+        /// Return the next row, or null when all row groups are exhausted. See
+        /// the type's doc comment for the lifetime of the returned row.
+        pub fn next(self: *StreamingRowIterator) !?*const Row {
+            while (self.cursor >= self.num_rows) {
+                self.freeGroup();
+                if (self.current_rg >= self.reader.metadata.row_groups.len) return null;
+                // Advance only after a successful load, as RowIterator does, so
+                // a failed group is retried by the next call.
+                try self.loadGroup(self.current_rg);
+                self.current_rg += 1;
+            }
+            const r = self.cursor;
+            self.cursor += 1;
+            if (self.fallback_rows) |rows| return &rows[r];
+            fillFlatRow(self.row.values, self.column_values, self.leaves, r);
+            return &self.row;
+        }
+
+        /// Free the current row group and the iterator arena.
+        pub fn deinit(self: *StreamingRowIterator) void {
+            self.freeGroup();
+            self.arena.deinit();
+        }
+
+        /// Decode row group `rg_idx`. On error, whatever was loaded stays in
+        /// `self` with `num_rows == 0`, so the next `next()` or `deinit()` frees it.
+        fn loadGroup(self: *StreamingRowIterator, rg_idx: usize) !void {
+            const reader = self.reader;
+            const gpa = reader.allocator;
+            const rg = &reader.metadata.row_groups[rg_idx];
+            const num_rows = try safeRowCount(rg.num_rows);
+            if (num_rows == 0 or rg.columns.len == 0) return;
+
+            self.leaves = (try reader.planFlatLeaves(rg.columns.len, self.col_indices)) orelse {
+                const rows = try reader.readRowsInternal(rg_idx, self.col_indices, null);
+                self.fallback_rows = rows;
+                self.num_rows = rows.len;
+                return;
+            };
+            self.column_values = try gpa.alloc([]Value, rg.columns.len);
+            @memset(self.column_values, &.{});
+            self.row.values = try gpa.alloc(Value, self.leaves.len);
+
+            const prev_bytes_alloc = value_mod.bytes_arena_allocator;
+            value_mod.bytes_arena_allocator = self.arena.allocator();
+            defer value_mod.bytes_arena_allocator = prev_bytes_alloc;
+            try reader.readFlatColumns(rg_idx, self.leaves, self.column_values);
+            self.num_rows = num_rows;
+        }
+
+        fn freeGroup(self: *StreamingRowIterator) void {
+            const gpa = self.reader.allocator;
+            if (self.fallback_rows) |rows| {
+                for (rows) |row| row.deinit();
+                gpa.free(rows);
+                self.fallback_rows = null;
+            }
+            // Flat leaf values are scalars or byte slices in `arena`, so only the
+            // arrays are freed; the arena reset releases the bytes.
+            for (self.column_values) |vals| gpa.free(vals);
+            gpa.free(self.column_values);
+            self.column_values = &.{};
+            gpa.free(self.leaves);
+            self.leaves = &.{};
+            gpa.free(self.row.values);
+            self.row.values = &.{};
+            _ = self.arena.reset(.retain_capacity);
+            self.cursor = 0;
+            self.num_rows = 0;
+        }
+    };
+
+    /// Create a streaming row iterator over all row groups (see
+    /// `StreamingRowIterator` for the row lifetime contract).
+    /// No I/O occurs until the first call to `next()`.
+    pub fn rowIteratorStreaming(self: *Self) StreamingRowIterator {
+        return self.rowIteratorStreamingInternal(null);
+    }
+
+    /// Streaming row iterator over the given top-level columns, in that order.
+    /// `col_indices` must outlive the iterator.
+    pub fn rowIteratorStreamingProjected(self: *Self, col_indices: []const usize) StreamingRowIterator {
+        return self.rowIteratorStreamingInternal(col_indices);
+    }
+
+    fn rowIteratorStreamingInternal(self: *Self, col_indices: ?[]const usize) StreamingRowIterator {
+        return .{
+            .reader = self,
+            .col_indices = col_indices,
+            .row = .{ .values = &.{}, .allocator = self.allocator, .bytes_borrowed = true, .values_borrowed = true },
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
         };
     }
 
     /// Read all rows from a row group as dynamic Value types
     pub fn readAllRows(self: *Self, row_group_index: usize) ![]Row {
-        return self.readRowsInternal(row_group_index, null);
+        return self.readRowsInternal(row_group_index, null, null);
     }
 
     /// Read rows from a row group, returning only the specified top-level columns.
     /// Column indices refer to top-level schema columns (not leaf columns).
     /// Returned rows contain values in dense order matching the projection list.
     pub fn readRowsProjected(self: *Self, row_group_index: usize, col_indices: []const usize) ![]Row {
-        return self.readRowsInternal(row_group_index, col_indices);
+        return self.readRowsInternal(row_group_index, col_indices, null);
     }
 
     /// Read rows from a row group, applying page-index-driven filters to skip
@@ -481,7 +614,7 @@ pub const DynamicReader = struct {
             }
 
             // Decode using the substituted buffer.
-            const decoded = try self.readColumnDynamicWithData(col_idx, row_group_index, page_result.data);
+            const decoded = try self.readColumnDynamicWithData(col_idx, row_group_index, page_result.data, false);
             // We don't use def/rep levels in the flat path; free them if present.
             if (decoded.def_levels) |dl| self.allocator.free(dl);
             if (decoded.rep_levels) |rl| self.allocator.free(rl);
@@ -537,10 +670,15 @@ pub const DynamicReader = struct {
         }
 
         // Assemble flat rows from the kept per-column values.
-        return self.assembleFlatRows(canonical.len, num_leaf_columns, column_values, null);
+        return self.assembleFlatRows(canonical.len, num_leaf_columns, column_values, null, null);
     }
 
-    fn readRowsInternal(self: *Self, row_group_index: usize, col_indices: ?[]const usize) ![]Row {
+    fn readRowsInternal(
+        self: *Self,
+        row_group_index: usize,
+        col_indices: ?[]const usize,
+        rows_arena: ?*std.heap.ArenaAllocator,
+    ) ![]Row {
         if (row_group_index >= self.metadata.row_groups.len) {
             return try self.allocator.alloc(Row, 0);
         }
@@ -562,49 +700,23 @@ pub const DynamicReader = struct {
             return try self.allocator.alloc(Row, 0);
         }
 
-        const schema = self.metadata.schema;
-        const num_top: usize = if (schema.len > 0)
-            safe.castTo(usize, schema[0].num_children orelse 0) catch 0
-        else
-            0;
+        // Read needed leaf columns into fixed-size arrays
+        const column_values = try self.allocator.alloc([]Value, num_leaf_columns);
+        @memset(column_values, &.{});
+        defer self.freeColumnValues(column_values);
 
-        const is_flat = num_top == 0;
-        const num_top_columns = if (is_flat) num_leaf_columns else num_top;
-
-        // Validate projection indices
-        if (col_indices) |indices| {
-            for (indices) |idx| {
-                if (idx >= num_top_columns) return error.InvalidArgument;
-            }
+        // Flat read (also validates `col_indices`): every requested column is
+        // one primitive leaf, so no levels are kept and cells are moved.
+        if (try self.planFlatLeaves(num_leaf_columns, col_indices)) |leaves| {
+            defer self.allocator.free(leaves);
+            try self.readFlatColumns(row_group_index, leaves, column_values);
+            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, leaves, rows_arena);
         }
 
-        // Compute top-level-to-leaf mapping for nested schemas
+        // Nested read: compute the top-level-to-leaf mapping.
         var schema_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer schema_arena.deinit();
-        const sa = schema_arena.allocator();
-
-        const top_infos = if (!is_flat) blk: {
-            const infos = try self.allocator.alloc(TopColInfo, num_top);
-            errdefer self.allocator.free(infos);
-
-            var schema_idx: usize = 1;
-            var leaf_offset: usize = 0;
-            for (0..num_top) |top_idx| {
-                if (schema_idx >= schema.len) return error.InvalidSchema;
-                const build_result = try schema_mod.SchemaNode.buildFromElements(sa, schema, schema_idx);
-                const lc = build_result.node.countLeafColumns();
-                infos[top_idx] = .{
-                    .leaf_start = leaf_offset,
-                    .leaf_count = lc,
-                    .is_nested = lc > 1 or !build_result.node.unwrapOptional().isPrimitive(),
-                    .schema_node = build_result.node,
-                };
-                schema_idx = build_result.next_idx;
-                leaf_offset += lc;
-            }
-            break :blk infos;
-        } else null;
-        defer if (top_infos) |ti| self.allocator.free(ti);
+        const top_infos = try self.buildTopInfos(schema_arena.allocator());
 
         // Build set of leaf columns to read
         const leaf_needed = try self.allocator.alloc(bool, num_leaf_columns);
@@ -612,29 +724,14 @@ pub const DynamicReader = struct {
 
         if (col_indices) |indices| {
             @memset(leaf_needed, false);
-            if (is_flat) {
-                for (indices) |idx| leaf_needed[idx] = true;
-            } else {
-                for (indices) |top_idx| {
-                    const info = top_infos.?[top_idx];
-                    for (info.leaf_start..info.leaf_start + info.leaf_count) |leaf| {
-                        if (leaf < num_leaf_columns) leaf_needed[leaf] = true;
-                    }
+            for (indices) |top_idx| {
+                const info = top_infos[top_idx];
+                for (info.leaf_start..info.leaf_start + info.leaf_count) |leaf| {
+                    if (leaf < num_leaf_columns) leaf_needed[leaf] = true;
                 }
             }
         } else {
             @memset(leaf_needed, true);
-        }
-
-        // Read needed leaf columns into fixed-size arrays
-        const column_values = try self.allocator.alloc([]Value, num_leaf_columns);
-        @memset(column_values, &.{});
-        defer {
-            for (column_values) |vals| {
-                for (vals) |v| v.deinit(self.allocator);
-                if (vals.len > 0) self.allocator.free(vals);
-            }
-            self.allocator.free(column_values);
         }
 
         const column_def_levels = try self.allocator.alloc(?[]u32, num_leaf_columns);
@@ -657,30 +754,113 @@ pub const DynamicReader = struct {
 
         for (0..num_leaf_columns) |col_idx| {
             if (!leaf_needed[col_idx]) continue;
-            const result = try self.readColumnDynamic(col_idx, row_group_index);
+            const result = try self.readColumnDynamic(col_idx, row_group_index, true);
             column_values[col_idx] = result.values;
             column_def_levels[col_idx] = result.def_levels;
             column_rep_levels[col_idx] = result.rep_levels;
         }
 
-        // Assemble rows
-        if (is_flat) {
-            return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, col_indices);
-        }
         return self.assembleNestedRows(
             num_rows,
             num_leaf_columns,
             column_values,
             column_def_levels,
             column_rep_levels,
-            top_infos.?,
+            top_infos,
             col_indices,
         );
     }
 
+    /// Number of top-level columns declared by the schema root (0 when the
+    /// root declares none; leaves are then the top-level columns).
+    fn numTopColumns(self: *const Self) usize {
+        const schema = self.metadata.schema;
+        return if (schema.len > 0)
+            safe.castTo(usize, schema[0].num_children orelse 0) catch 0
+        else
+            0;
+    }
+
+    /// Top-level-to-leaf mapping for a schema with `numTopColumns() > 0`.
+    /// Infos and schema nodes are allocated in `sa`.
+    fn buildTopInfos(self: *const Self, sa: std.mem.Allocator) ![]TopColInfo {
+        const schema = self.metadata.schema;
+        const infos = try sa.alloc(TopColInfo, self.numTopColumns());
+        var schema_idx: usize = 1;
+        var leaf_offset: usize = 0;
+        for (infos) |*info| {
+            if (schema_idx >= schema.len) return error.InvalidSchema;
+            const build_result = try schema_mod.SchemaNode.buildFromElements(sa, schema, schema_idx);
+            const lc = build_result.node.countLeafColumns();
+            info.* = .{
+                .leaf_start = leaf_offset,
+                .leaf_count = lc,
+                .is_nested = lc > 1 or !build_result.node.unwrapOptional().isPrimitive(),
+                .schema_node = build_result.node,
+            };
+            schema_idx = build_result.next_idx;
+            leaf_offset += lc;
+        }
+        return infos;
+    }
+
+    /// Validate `col_indices` (top-level columns). When every requested column
+    /// is a single primitive leaf present in the row group, return the leaf
+    /// index of each output column (caller frees); return null when the read
+    /// needs nested assembly. Only the requested columns are considered.
+    fn planFlatLeaves(self: *const Self, num_leaf_columns: usize, col_indices: ?[]const usize) !?[]usize {
+        const num_top = self.numTopColumns();
+        const is_flat = num_top == 0;
+        const num_top_columns = if (is_flat) num_leaf_columns else num_top;
+        if (col_indices) |indices| {
+            for (indices) |idx| {
+                if (idx >= num_top_columns) return error.InvalidArgument;
+            }
+        }
+
+        const leaves = try self.allocator.alloc(usize, if (col_indices) |c| c.len else num_top_columns);
+        errdefer self.allocator.free(leaves);
+        for (leaves, 0..) |*l, i| l.* = if (col_indices) |c| c[i] else i;
+        if (is_flat) return leaves;
+
+        var schema_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer schema_arena.deinit();
+        const top_infos = try self.buildTopInfos(schema_arena.allocator());
+        for (leaves) |*l| {
+            const info = top_infos[l.*];
+            if (info.is_nested or info.leaf_start >= num_leaf_columns) {
+                self.allocator.free(leaves);
+                return null;
+            }
+            l.* = info.leaf_start;
+        }
+        return leaves;
+    }
+
+    /// Decode each leaf in `leaves` into `column_values[leaf]`, dropping levels.
+    /// The caller owns `column_values` (pre-filled with empty slices) and frees
+    /// it on error as well.
+    fn readFlatColumns(self: *Self, row_group_index: usize, leaves: []const usize, column_values: [][]Value) !void {
+        for (leaves) |leaf| {
+            if (column_values[leaf].len > 0) continue; // projected more than once
+            const result = try self.readColumnDynamic(leaf, row_group_index, false);
+            // keep_levels = false, so no level arrays are returned.
+            std.debug.assert(result.def_levels == null and result.rep_levels == null);
+            column_values[leaf] = result.values;
+        }
+    }
+
+    fn freeColumnValues(self: *Self, column_values: [][]Value) void {
+        for (column_values) |vals| {
+            for (vals) |v| v.deinit(self.allocator);
+            if (vals.len > 0) self.allocator.free(vals);
+        }
+        self.allocator.free(column_values);
+    }
+
     /// Read a single column dynamically
-    fn readColumnDynamic(self: *Self, column_index: usize, row_group_index: usize) !column_decoder.DynamicDecodeResult {
-        return self.readColumnDynamicWithData(column_index, row_group_index, null);
+    fn readColumnDynamic(self: *Self, column_index: usize, row_group_index: usize, keep_levels: bool) !column_decoder.DynamicDecodeResult {
+        return self.readColumnDynamicWithData(column_index, row_group_index, null, keep_levels);
     }
 
     /// Read a single column, optionally using caller-supplied page bytes.
@@ -694,6 +874,7 @@ pub const DynamicReader = struct {
         column_index: usize,
         row_group_index: usize,
         override_page_data: ?[]const u8,
+        keep_levels: bool,
     ) !column_decoder.DynamicDecodeResult {
         const rg = &self.metadata.row_groups[row_group_index];
         if (column_index >= rg.columns.len) return error.InvalidArgument;
@@ -701,13 +882,38 @@ pub const DynamicReader = struct {
         const chunk = &rg.columns[column_index];
         const meta = chunk.meta_data orelse return error.InvalidArgument;
 
-        // Read the raw page data (or use caller's buffer).
-        const owned_page_data: ?[]u8 = if (override_page_data == null)
-            try self.readColumnChunkData(chunk)
+        // Zero-copy BYTE_ARRAY values (see `column_decoder.borrow_bytes`): when
+        // byte payloads go to a bytes arena and this function owns the page
+        // buffers, those buffers are allocated from that arena and decoded values
+        // point into them. They then live exactly as long as arena copies would
+        // have (until the arena's reset/deinit); nothing frees them per value.
+        const borrow_arena: ?std.mem.Allocator = if (override_page_data == null and
+            if (format.getColumnInfo(self.metadata.schema, column_index)) |ci| ci.element.type_ == .byte_array else false)
+            value_mod.bytes_arena_allocator
         else
             null;
-        defer if (owned_page_data) |pd| self.allocator.free(pd);
+        // Page buffers (the whole chunk and every decompressed page) go to the
+        // arena when borrowing and are then never freed here: an arena free of
+        // its last allocation would hand the bytes to the next page. The chunk
+        // goes there whatever the codec: a V2 page with is_compressed = false
+        // (or an empty values section) is decoded straight from the chunk.
+        const page_alloc = borrow_arena orelse self.allocator;
+        const free_pages = borrow_arena == null;
+
+        // Read the raw page data (or use caller's buffer).
+        const owned_page_data: ?[]u8 = if (override_page_data == null)
+            try self.readColumnChunkData(page_alloc, chunk)
+        else
+            null;
+        defer if (owned_page_data) |pd| if (free_pages) page_alloc.free(pd);
         const page_data: []const u8 = owned_page_data orelse override_page_data.?;
+
+        // Set only after the chunk read: no I/O happens below while the
+        // threadlocal flag is on, so an evented Io cannot run another decoder
+        // on this thread with it set.
+        const prev_borrow = column_decoder.borrow_bytes;
+        column_decoder.borrow_bytes = borrow_arena != null;
+        defer column_decoder.borrow_bytes = prev_borrow;
 
         var pos: usize = 0;
 
@@ -760,9 +966,9 @@ pub const DynamicReader = struct {
 
                 // Decompress dictionary page if needed
                 const dict_data = if (meta.codec != .uncompressed) blk: {
-                    break :blk try self.decompressData(dict_compressed, meta.codec, dict_uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, dict_compressed, meta.codec, dict_uncompressed_size);
                 } else dict_compressed;
-                defer if (meta.codec != .uncompressed) self.allocator.free(dict_data);
+                defer if (meta.codec != .uncompressed and free_pages) self.allocator.free(dict_data);
 
                 // Build dictionaries based on physical type
                 const column_info_for_dict = format.getColumnInfo(self.metadata.schema, column_index);
@@ -770,7 +976,10 @@ pub const DynamicReader = struct {
                     if (info.element.type_) |phys_type| {
                         switch (phys_type) {
                             .byte_array => {
-                                string_dict = try dictionary.StringDictionary.fromPlain(self.allocator, dict_data, dict_num_values);
+                                string_dict = if (borrow_arena != null)
+                                    try dictionary.StringDictionary.fromPlainBorrowed(self.allocator, dict_data, dict_num_values)
+                                else
+                                    try dictionary.StringDictionary.fromPlain(self.allocator, dict_data, dict_num_values);
                             },
                             .int32 => {
                                 int32_dict = try dictionary.Int32Dictionary.fromPlain(self.allocator, dict_data, dict_num_values);
@@ -884,9 +1093,9 @@ pub const DynamicReader = struct {
                         break :blk values_compressed; // Return empty slice, no decompression needed
                     }
                     values_data_allocated = true;
-                    break :blk try self.decompressData(values_compressed, meta.codec, values_uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, values_compressed, meta.codec, values_uncompressed_size);
                 } else values_compressed;
-                defer if (values_data_allocated) self.allocator.free(values_data);
+                defer if (values_data_allocated and free_pages) self.allocator.free(values_data);
 
                 // Get value encoding from page header (used for delta encodings)
                 const value_encoding = v2.encoding;
@@ -912,20 +1121,28 @@ pub const DynamicReader = struct {
                     if (int96_dict) |*d| d else null,
                     value_encoding,
                 );
+                errdefer page_result.deinit(self.allocator);
 
-                // Append values (transfer ownership)
-                try all_values.appendSlice(self.allocator, page_result.values);
-                self.allocator.free(page_result.values);
+                // Take ownership of the page's values. The first page's buffer becomes
+                // the chunk buffer, so single-page chunks are never copied.
+                if (all_values.capacity == 0) {
+                    all_values = .fromOwnedSlice(page_result.values);
+                } else {
+                    try all_values.appendSlice(self.allocator, page_result.values);
+                    self.allocator.free(page_result.values);
+                }
                 page_result.values = &.{};
 
-                // Append levels
+                // Levels are only consumed by nested assembly.
                 if (page_result.def_levels) |dl| {
-                    try all_def_levels.appendSlice(self.allocator, dl);
+                    if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
+                    page_result.def_levels = null;
                 }
                 if (page_result.rep_levels) |rl| {
-                    try all_rep_levels.appendSlice(self.allocator, rl);
+                    if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
+                    page_result.rep_levels = null;
                 }
             } else if (page_header.data_page_header) |dph| {
                 // DataPageV1: levels are inside compressed data with length prefixes
@@ -933,9 +1150,9 @@ pub const DynamicReader = struct {
                 // Decompress entire page if needed
                 const value_data = if (meta.codec != .uncompressed) blk: {
                     const uncompressed_size = try safePageSize(page_header.uncompressed_page_size);
-                    break :blk try self.decompressData(compressed_body, meta.codec, uncompressed_size);
+                    break :blk try self.decompressData(page_alloc, compressed_body, meta.codec, uncompressed_size);
                 } else compressed_body;
-                defer if (meta.codec != .uncompressed) self.allocator.free(value_data);
+                defer if (meta.codec != .uncompressed and free_pages) self.allocator.free(value_data);
 
                 const num_values = try safePageSize(dph.num_values);
                 if (num_values == 0) continue;
@@ -966,20 +1183,28 @@ pub const DynamicReader = struct {
                     rep_level_encoding,
                     value_encoding_v1,
                 );
+                errdefer page_result.deinit(self.allocator);
 
-                // Append values (transfer ownership)
-                try all_values.appendSlice(self.allocator, page_result.values);
-                self.allocator.free(page_result.values);
+                // Take ownership of the page's values. The first page's buffer becomes
+                // the chunk buffer, so single-page chunks are never copied.
+                if (all_values.capacity == 0) {
+                    all_values = .fromOwnedSlice(page_result.values);
+                } else {
+                    try all_values.appendSlice(self.allocator, page_result.values);
+                    self.allocator.free(page_result.values);
+                }
                 page_result.values = &.{};
 
-                // Append levels
+                // Levels are only consumed by nested assembly.
                 if (page_result.def_levels) |dl| {
-                    try all_def_levels.appendSlice(self.allocator, dl);
+                    if (keep_levels) try all_def_levels.appendSlice(self.allocator, dl);
                     self.allocator.free(dl);
+                    page_result.def_levels = null;
                 }
                 if (page_result.rep_levels) |rl| {
-                    try all_rep_levels.appendSlice(self.allocator, rl);
+                    if (keep_levels) try all_rep_levels.appendSlice(self.allocator, rl);
                     self.allocator.free(rl);
+                    page_result.rep_levels = null;
                 }
             }
         }
@@ -1025,7 +1250,10 @@ pub const DynamicReader = struct {
             if (projected_top_indices) |indices| {
                 var needed = false;
                 for (indices) |pi| {
-                    if (pi == top_idx) { needed = true; break; }
+                    if (pi == top_idx) {
+                        needed = true;
+                        break;
+                    }
                 }
                 if (!needed) continue;
             }
@@ -1115,6 +1343,7 @@ pub const DynamicReader = struct {
         num_columns: usize,
         column_values: [][]Value,
         projected_col_indices: ?[]const usize,
+        rows_arena: ?*std.heap.ArenaAllocator,
     ) ![]Row {
         const output_indices = projected_col_indices orelse blk: {
             const all = try self.allocator.alloc(usize, num_columns);
@@ -1125,38 +1354,36 @@ pub const DynamicReader = struct {
 
         const num_output_cols = output_indices.len;
         const rows = try self.allocator.alloc(Row, num_rows);
-        var rows_initialized: usize = 0;
-        errdefer {
-            for (rows[0..rows_initialized]) |row| row.deinit();
-            self.allocator.free(rows);
+        errdefer self.allocator.free(rows);
+
+        // Flat values are scalars or byte slices owned by the reader's bytes arena
+        // (bytes_arena_allocator is set for the whole read), so cells are moved, not
+        // cloned. The caller's `column_values` cleanup then frees only the arrays.
+        if (rows_arena) |arena| {
+            const cells = std.math.mul(usize, num_rows, num_output_cols) catch return error.OutOfMemory;
+            const block = try arena.allocator().alloc(Value, cells);
+            for (rows, 0..) |*row, r| {
+                const vals = block[r * num_output_cols ..][0..num_output_cols];
+                fillFlatRow(vals, column_values, output_indices, r);
+                row.* = .{ .values = vals, .allocator = self.allocator, .bytes_borrowed = true, .values_borrowed = true };
+            }
+            return rows;
         }
 
-        for (0..num_rows) |row_idx| {
-            const values = try self.allocator.alloc(Value, num_output_cols);
-            var vals_initialized: usize = 0;
-            errdefer {
-                for (values[0..vals_initialized]) |val| val.deinit(self.allocator);
-                self.allocator.free(values);
-            }
-
-            for (output_indices, 0..) |col_idx, out_idx| {
-                if (row_idx < column_values[col_idx].len) {
-                    values[out_idx] = try cloneValue(self.allocator, column_values[col_idx][row_idx]);
-                } else {
-                    values[out_idx] = .{ .null_val = {} };
-                }
-                vals_initialized += 1;
-            }
-
-            rows[row_idx] = .{ .values = values, .allocator = self.allocator, .bytes_borrowed = true };
+        var rows_initialized: usize = 0;
+        errdefer for (rows[0..rows_initialized]) |row| row.deinit();
+        for (rows, 0..) |*row, r| {
+            const vals = try self.allocator.alloc(Value, num_output_cols);
+            fillFlatRow(vals, column_values, output_indices, r);
+            row.* = .{ .values = vals, .allocator = self.allocator, .bytes_borrowed = true };
             rows_initialized += 1;
         }
         return rows;
     }
 
     /// Read raw page data for a column chunk
-    fn readColumnChunkData(self: *Self, chunk: *const format.ColumnChunk) ![]u8 {
-        return parquet_reader.readColumnChunkData(self.allocator, self.getSource(), chunk) catch |e| {
+    fn readColumnChunkData(self: *Self, allocator: std.mem.Allocator, chunk: *const format.ColumnChunk) ![]u8 {
+        return parquet_reader.readColumnChunkData(allocator, self.getSource(), chunk) catch |e| {
             return switch (e) {
                 error.InvalidArgument => error.InvalidArgument,
                 error.OutOfMemory => error.OutOfMemory,
@@ -1167,8 +1394,9 @@ pub const DynamicReader = struct {
     }
 
     /// Decompress page data
-    fn decompressData(self: *Self, compressed: []const u8, codec: format.CompressionCodec, uncompressed_size: usize) ![]u8 {
-        return compress.decompress(self.allocator, compressed, codec, uncompressed_size) catch |err| switch (err) {
+    fn decompressData(self: *Self, allocator: std.mem.Allocator, compressed: []const u8, codec: format.CompressionCodec, uncompressed_size: usize) ![]u8 {
+        _ = self;
+        return compress.decompress(allocator, compressed, codec, uncompressed_size) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.DecompressionError => return error.DecompressionError,
             error.UnsupportedCompression => return error.UnsupportedCompression,
@@ -1183,6 +1411,15 @@ pub const DynamicReader = struct {
         mutable_header.deinit(self.allocator);
     }
 };
+
+/// Move row `row` of each projected column into `dst` (no cloning). Missing
+/// trailing values in a column become null.
+fn fillFlatRow(dst: []Value, column_values: []const []Value, output_indices: []const usize, row: usize) void {
+    for (output_indices, dst) |col_idx, *d| {
+        const col = column_values[col_idx];
+        d.* = if (row < col.len) col[row] else .{ .null_val = {} };
+    }
+}
 
 /// Clone a Value, allocating new memory for any heap data
 fn cloneValue(allocator: std.mem.Allocator, v: Value) !Value {

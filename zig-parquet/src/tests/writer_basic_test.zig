@@ -700,3 +700,100 @@ test "sorting_columns defaults to null" {
         try std.testing.expectEqual(@as(?[]const format.SortingColumn, null), reader.metadata.row_groups[0].sorting_columns);
     }
 }
+
+test "DynamicWriter list<struct> mixed with other columns" {
+    const allocator = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file_path = "dw_list_struct_mixed.parquet";
+
+    // Write: id, items (optional list<struct{a,b}>), flag. The repeated "list"
+    // group used to be written with num_children = fields.len, swallowing "flag".
+    {
+        const file = try tmp_dir.dir.createFile(io, file_path, .{});
+        defer file.close(io);
+
+        var writer = try parquet.createFileDynamic(allocator, file, io);
+        defer writer.deinit();
+
+        try writer.addColumn("id", parquet.TypeInfo.int64.asRequired(), .{});
+
+        const a_node = try writer.allocSchemaNode(.{ .int32 = .{} });
+        const b_node = try writer.allocSchemaNode(.{ .byte_array = .{ .logical = .string } });
+        const fields = try writer.allocSchemaFields(2);
+        fields[0] = .{ .name = try writer.dupeSchemaName("a"), .node = a_node };
+        fields[1] = .{ .name = try writer.dupeSchemaName("b"), .node = b_node };
+        const struct_node = try writer.allocSchemaNode(.{ .struct_ = .{ .fields = fields } });
+        const list_node = try writer.allocSchemaNode(.{ .list = struct_node });
+        const opt_list_node = try writer.allocSchemaNode(.{ .optional = list_node });
+        try writer.addColumnNested("items", opt_list_node, .{});
+
+        try writer.addColumn("flag", parquet.TypeInfo.bool_, .{});
+        try writer.begin();
+
+        try writer.setInt64(0, 1);
+        try writer.beginList(1);
+        try writer.beginStruct(1);
+        try writer.setStructField(1, 0, .{ .int32_val = 1 });
+        try writer.setStructFieldBytes(1, 1, "x");
+        try writer.endStruct(1);
+        try writer.beginStruct(1);
+        try writer.setStructField(1, 0, .{ .int32_val = 2 });
+        try writer.setStructFieldBytes(1, 1, "y");
+        try writer.endStruct(1);
+        try writer.endList(1);
+        try writer.setBool(2, true);
+        try writer.addRow();
+
+        try writer.setInt64(0, 2);
+        try writer.beginList(1);
+        try writer.beginStruct(1);
+        try writer.setStructField(1, 0, .{ .int32_val = 3 });
+        try writer.setStructFieldBytes(1, 1, "z");
+        try writer.endStruct(1);
+        try writer.endList(1);
+        try writer.setBool(2, false);
+        try writer.addRow();
+
+        try writer.close();
+    }
+
+    {
+        const file = try tmp_dir.dir.openFile(io, file_path, .{});
+        defer file.close(io);
+
+        var reader = try parquet.openFileDynamic(allocator, file, io, .{});
+        defer reader.deinit();
+
+        try std.testing.expectEqual(@as(?i32, 1), reader.metadata.schema[3].num_children);
+
+        const rows = try reader.readAllRows(0);
+        defer {
+            for (rows) |row| row.deinit();
+            allocator.free(rows);
+        }
+
+        try std.testing.expectEqual(@as(usize, 2), rows.len);
+
+        try std.testing.expectEqual(@as(?i64, 1), rows[0].getColumn(0).?.asInt64());
+        const items0 = rows[0].getColumn(1).?.asList().?;
+        try std.testing.expectEqual(@as(usize, 2), items0.len);
+        const s00 = items0[0].asStruct().?;
+        try std.testing.expectEqual(@as(i32, 1), s00[0].value.asInt32().?);
+        try std.testing.expectEqualStrings("x", s00[1].value.asBytes().?);
+        const s01 = items0[1].asStruct().?;
+        try std.testing.expectEqual(@as(i32, 2), s01[0].value.asInt32().?);
+        try std.testing.expectEqualStrings("y", s01[1].value.asBytes().?);
+        try std.testing.expectEqual(@as(?bool, true), rows[0].getColumn(2).?.asBool());
+
+        try std.testing.expectEqual(@as(?i64, 2), rows[1].getColumn(0).?.asInt64());
+        const items1 = rows[1].getColumn(1).?.asList().?;
+        try std.testing.expectEqual(@as(usize, 1), items1.len);
+        const s10 = items1[0].asStruct().?;
+        try std.testing.expectEqual(@as(i32, 3), s10[0].value.asInt32().?);
+        try std.testing.expectEqualStrings("z", s10[1].value.asBytes().?);
+        try std.testing.expectEqual(@as(?bool, false), rows[1].getColumn(2).?.asBool());
+    }
+}

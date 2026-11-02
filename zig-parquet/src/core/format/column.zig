@@ -12,6 +12,11 @@ pub const CompressionCodec = types.CompressionCodec;
 pub const Statistics = statistics.Statistics;
 pub const GeospatialStatistics = statistics.GeospatialStatistics;
 
+fn freePaths(allocator: std.mem.Allocator, paths: []const []const u8) void {
+    for (paths) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
 /// Column metadata
 pub const ColumnMetaData = struct {
     type_: PhysicalType = .int32,
@@ -30,8 +35,18 @@ pub const ColumnMetaData = struct {
 
     const Self = @This();
 
+    /// Free everything parse() allocated. Safe on a partially filled value.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.encodings);
+        freePaths(allocator, self.path_in_schema);
+        if (self.statistics) |*stats| stats.deinit(allocator);
+        if (self.geospatial_statistics) |*geo| geo.deinit(allocator);
+        self.* = .{};
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var meta = Self{};
+        errdefer meta.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -40,18 +55,29 @@ pub const ColumnMetaData = struct {
                 1 => meta.type_ = try PhysicalType.fromInt(try reader.readI32()),
                 2 => {
                     const list_header = try reader.readListHeader();
-                    var encodings = try allocator.alloc(Encoding, list_header.size);
-                    for (0..list_header.size) |i| {
-                        encodings[i] = try Encoding.fromInt(try reader.readI32());
+                    try reader.checkListFits(list_header.size);
+                    const encodings = try allocator.alloc(Encoding, list_header.size);
+                    errdefer allocator.free(encodings);
+                    for (encodings) |*slot| {
+                        slot.* = try Encoding.fromInt(try reader.readI32());
                     }
+                    allocator.free(meta.encodings);
                     meta.encodings = encodings;
                 },
                 3 => {
                     const list_header = try reader.readListHeader();
-                    var paths = try allocator.alloc([]const u8, list_header.size);
-                    for (0..list_header.size) |i| {
-                        paths[i] = try allocator.dupe(u8, try reader.readString());
+                    try reader.checkListFits(list_header.size);
+                    const paths = try allocator.alloc([]const u8, list_header.size);
+                    var parsed: usize = 0;
+                    errdefer {
+                        for (paths[0..parsed]) |path| allocator.free(path);
+                        allocator.free(paths);
                     }
+                    for (paths) |*slot| {
+                        slot.* = try allocator.dupe(u8, try reader.readString());
+                        parsed += 1;
+                    }
+                    freePaths(allocator, meta.path_in_schema);
                     meta.path_in_schema = paths;
                 },
                 4 => meta.codec = try CompressionCodec.fromInt(try reader.readI32()),
@@ -61,8 +87,16 @@ pub const ColumnMetaData = struct {
                 9 => meta.data_page_offset = try reader.readI64(),
                 10 => meta.index_page_offset = try reader.readI64(),
                 11 => meta.dictionary_page_offset = try reader.readI64(),
-                12 => meta.statistics = try Statistics.parse(allocator, reader),
-                17 => meta.geospatial_statistics = try GeospatialStatistics.parse(allocator, reader),
+                12 => {
+                    const stats = try Statistics.parse(allocator, reader);
+                    if (meta.statistics) |*old| old.deinit(allocator);
+                    meta.statistics = stats;
+                },
+                17 => {
+                    const geo = try GeospatialStatistics.parse(allocator, reader);
+                    if (meta.geospatial_statistics) |*old| old.deinit(allocator);
+                    meta.geospatial_statistics = geo;
+                },
                 else => try reader.skip(field.field_type),
             }
         }
@@ -144,16 +178,32 @@ pub const ColumnChunk = struct {
 
     const Self = @This();
 
+    /// Free everything parse() allocated. Safe on a partially filled value.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.file_path) |fp| allocator.free(fp);
+        if (self.meta_data) |*md| md.deinit(allocator);
+        self.* = .{};
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var chunk = Self{};
+        errdefer chunk.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
-                1 => chunk.file_path = try allocator.dupe(u8, try reader.readString()),
+                1 => {
+                    const path = try allocator.dupe(u8, try reader.readString());
+                    if (chunk.file_path) |old| allocator.free(old);
+                    chunk.file_path = path;
+                },
                 2 => chunk.file_offset = try reader.readI64(),
-                3 => chunk.meta_data = try ColumnMetaData.parse(allocator, reader),
+                3 => {
+                    const md = try ColumnMetaData.parse(allocator, reader);
+                    if (chunk.meta_data) |*old| old.deinit(allocator);
+                    chunk.meta_data = md;
+                },
                 4 => chunk.offset_index_offset = try reader.readI64(),
                 5 => chunk.offset_index_length = try reader.readI32(),
                 6 => chunk.column_index_offset = try reader.readI64(),

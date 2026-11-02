@@ -57,7 +57,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8, bit_width: u5, num
             const values_to_write = @min(repeat_count, num_values - out_idx);
 
             // Read the value (bit_width bits, rounded up to bytes)
-            const value_bytes = (bit_width + 7) / 8;
+            const value_bytes = (@as(usize, bit_width) + 7) / 8; // widened: u5 sum overflows for bit_width >= 25
             if (pos + value_bytes > data.len) break;
 
             var value: u32 = 0;
@@ -70,18 +70,13 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8, bit_width: u5, num
             pos += value_bytes;
 
             // Fill with repeated value
-            for (0..values_to_write) |_| {
-                result[out_idx] = value;
-                out_idx += 1;
-            }
+            @memset(result[out_idx..][0..values_to_write], value);
+            out_idx += values_to_write;
         }
     }
 
     // Fill remaining with 0 if we didn't get enough values
-    while (out_idx < num_values) {
-        result[out_idx] = 0;
-        out_idx += 1;
-    }
+    @memset(result[out_idx..], 0);
 
     return result;
 }
@@ -116,8 +111,9 @@ pub fn decodeBitPackedLevels(allocator: std.mem.Allocator, data: []const u8, bit
 }
 
 /// Calculate the byte size needed for bit-packed levels
-pub fn bitPackedSize(num_values: usize, bit_width: u5) usize {
-    return (num_values * bit_width + 7) / 8;
+pub fn bitPackedSize(num_values: usize, bit_width: u5) error{Overflow}!usize {
+    const bits = std.math.mul(usize, num_values, bit_width) catch return error.Overflow;
+    return bits / 8 + @intFromBool(bits % 8 != 0);
 }
 
 const VarIntResult = struct {
@@ -149,8 +145,25 @@ fn readVarInt(data: []const u8) !VarIntResult {
 
 fn decodeBitPacked(data: []const u8, bit_width: u5, output: []u32) !void {
     var bit_pos: usize = 0;
+    var done: usize = 0;
 
-    for (output) |*out| {
+    // Fast path: one unaligned 8-byte load per value. A value spans at most
+    // 7 (bit offset) + 31 (bit_width) = 38 bits, so it always fits in the word.
+    // Runs only while 8 bytes remain; the checked loop below handles the tail.
+    if (data.len >= 8) {
+        const mask: u64 = (@as(u64, 1) << bit_width) - 1;
+        const last_word = data.len - 8;
+        while (done < output.len) : (done += 1) {
+            const byte_pos = bit_pos >> 3;
+            if (byte_pos > last_word) break;
+            const word = std.mem.readInt(u64, data[byte_pos..][0..8], .little);
+            const shift: u6 = @truncate(bit_pos & 7); // 0..7
+            output[done] = @truncate((word >> shift) & mask); // masked to <= 31 bits
+            bit_pos += bit_width;
+        }
+    }
+
+    for (output[done..]) |*out| {
         const byte_pos = bit_pos / 8;
         const bit_offset: u3 = safe.castTo(u3, bit_pos % 8) catch return error.EndOfData;
 
@@ -161,7 +174,7 @@ fn decodeBitPacked(data: []const u8, bit_width: u5, output: []u32) !void {
 
         // Read up to 5 bytes to get 32 bits
         var value: u64 = 0;
-        const bytes_needed = (bit_offset + bit_width + 7) / 8;
+        const bytes_needed = (@as(usize, bit_offset) + bit_width + 7) / 8; // widened: u5 sum overflows for bit_width >= 25
 
         for (0..bytes_needed) |i| {
             if (byte_pos + i < data.len) {
@@ -260,4 +273,53 @@ test "RLE decode malicious indicator does not overflow" {
 
     // Should gracefully produce partial/zero results rather than panicking
     try std.testing.expect(result.len == 2);
+}
+
+test "RLE bit-packed round trip for every bit width" {
+    const allocator = std.testing.allocator;
+    const rle_encoder = @import("rle_encoder.zig");
+    const counts = [_]usize{ 1, 7, 8, 9, 63, 64, 65, 1000 };
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const random = prng.random();
+
+    for (1..32) |bw| {
+        const bit_width = safe.castTo(u5, bw) catch unreachable; // 1..31 fits in u5
+        const max_value: u32 = (@as(u32, 1) << bit_width) - 1;
+        for (counts) |n| {
+            const values = try allocator.alloc(u32, n);
+            defer allocator.free(values);
+            for (values) |*v| v.* = random.uintAtMost(u32, max_value);
+
+            const encoded = try rle_encoder.encode(allocator, values, bit_width);
+            defer allocator.free(encoded);
+            const decoded = try decode(allocator, encoded, bit_width, n);
+            defer allocator.free(decoded);
+
+            try std.testing.expectEqualSlices(u32, values, decoded);
+        }
+    }
+}
+
+test "RLE decode truncated bit-packed run zero-fills" {
+    const allocator = std.testing.allocator;
+
+    // Indicator 0x05 = 2 groups (16 values), bit width 8, only 12 payload bytes
+    const data = [_]u8{ 0x05, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const result = try decode(allocator, &data, 8, 16);
+    defer allocator.free(result);
+    const expected = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0 };
+    try std.testing.expectEqualSlices(u32, &expected, result);
+
+    // Indicator 0x03 = 1 group (8 values), bit width 8, only 4 payload bytes
+    const short = [_]u8{ 0x03, 1, 2, 3, 4 };
+    const result2 = try decode(allocator, &short, 8, 8);
+    defer allocator.free(result2);
+    const expected2 = [_]u32{ 1, 2, 3, 4, 0, 0, 0, 0 };
+    try std.testing.expectEqualSlices(u32, &expected2, result2);
+}
+
+test "bitPackedSize rounds up and rejects overflow" {
+    try std.testing.expectEqual(@as(usize, 2), try bitPackedSize(3, 5)); // 15 bits -> 2 bytes
+    try std.testing.expectEqual(@as(usize, 0), try bitPackedSize(0, 7));
+    try std.testing.expectError(error.Overflow, bitPackedSize(std.math.maxInt(usize), 31));
 }

@@ -1,12 +1,32 @@
 //! Brotli compression/decompression for Parquet
 //!
-//! Uses the Brotli C library via @cImport.
+//! Uses the Brotli C library.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("brotli/decode.h");
-    @cInclude("brotli/encode.h");
-});
+const c = struct {
+    const BROTLI_DEFAULT_QUALITY: c_int = 11;
+    const BROTLI_DEFAULT_WINDOW: c_int = 22;
+    const BROTLI_MODE_GENERIC: c_int = 0;
+    const BROTLI_TRUE: c_int = 1;
+    const BROTLI_DECODER_RESULT_SUCCESS: c_int = 1;
+
+    extern fn BrotliEncoderMaxCompressedSize(input_size: usize) usize;
+    extern fn BrotliEncoderCompress(
+        quality: c_int,
+        lgwin: c_int,
+        mode: c_int,
+        input_size: usize,
+        input_buffer: [*]const u8,
+        encoded_size: *usize,
+        encoded_buffer: [*]u8,
+    ) c_int;
+    extern fn BrotliDecoderDecompress(
+        encoded_size: usize,
+        encoded_buffer: [*]const u8,
+        decoded_size: *usize,
+        decoded_buffer: [*]u8,
+    ) c_int;
+};
 
 pub const Error = error{
     CompressionError,

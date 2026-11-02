@@ -34,7 +34,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 // ============================================================================
 // Primary API — Start here
@@ -121,6 +121,7 @@ pub const DynamicReaderError = reader_module.DynamicReaderError;
 pub const DynamicReaderOptions = reader_module.DynamicReaderOptions;
 pub const ChecksumOptions = reader_module.ChecksumOptions;
 pub const RowIterator = DynamicReader.RowIterator;
+pub const StreamingRowIterator = DynamicReader.StreamingRowIterator;
 pub const Row = value.Row;
 
 // Page-index filtering (read-time skip of pages whose min/max can't match).

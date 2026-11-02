@@ -58,6 +58,8 @@ pub const BatchError = error{
     InvalidFieldType,
     IntegerOverflow,
     InvalidListType,
+    InvalidMapType,
+    NestingTooDeep,
     ListTooLong,
     InvalidPhysicalType,
     InvalidRepetitionType,
@@ -112,10 +114,10 @@ fn createSchemaNode(
     const pd = try allocator.create(SchemaPrivateData);
     errdefer allocator.destroy(pd);
 
-    const fmt = try allocator.dupeZ(u8, format_str);
+    const fmt = try allocator.dupeSentinel(u8, format_str, 0);
     errdefer allocator.free(fmt);
 
-    const name_z = try allocator.dupeZ(u8, name);
+    const name_z = try allocator.dupeSentinel(u8, name, 0);
     errdefer allocator.free(name_z);
 
     pd.* = .{
@@ -359,30 +361,30 @@ fn parquetTypeToArrowFormat(allocator: Allocator, elem: format.SchemaElement) Sc
 
 fn logicalTypeToArrowFormat(allocator: Allocator, lt: format.LogicalType, elem: format.SchemaElement) SchemaConvError![:0]u8 {
     return switch (lt) {
-        .string => allocator.dupeZ(u8, "u"),
-        .enum_ => allocator.dupeZ(u8, "u"),
-        .json => allocator.dupeZ(u8, "u"),
-        .bson => allocator.dupeZ(u8, "z"),
-        .date => allocator.dupeZ(u8, "tdD"),
-        .uuid => allocator.dupeZ(u8, "w:16"),
-        .float16 => allocator.dupeZ(u8, "e"),
-        .geometry => allocator.dupeZ(u8, "z"),
-        .geography => allocator.dupeZ(u8, "z"),
+        .string => allocator.dupeSentinel(u8, "u", 0),
+        .enum_ => allocator.dupeSentinel(u8, "u", 0),
+        .json => allocator.dupeSentinel(u8, "u", 0),
+        .bson => allocator.dupeSentinel(u8, "z", 0),
+        .date => allocator.dupeSentinel(u8, "tdD", 0),
+        .uuid => allocator.dupeSentinel(u8, "w:16", 0),
+        .float16 => allocator.dupeSentinel(u8, "e", 0),
+        .geometry => allocator.dupeSentinel(u8, "z", 0),
+        .geography => allocator.dupeSentinel(u8, "z", 0),
         .int => |i| {
             if (i.is_signed) {
                 return switch (i.bit_width) {
-                    8 => allocator.dupeZ(u8, "c"),
-                    16 => allocator.dupeZ(u8, "s"),
-                    32 => allocator.dupeZ(u8, "i"),
-                    64 => allocator.dupeZ(u8, "l"),
+                    8 => allocator.dupeSentinel(u8, "c", 0),
+                    16 => allocator.dupeSentinel(u8, "s", 0),
+                    32 => allocator.dupeSentinel(u8, "i", 0),
+                    64 => allocator.dupeSentinel(u8, "l", 0),
                     else => error.UnsupportedType,
                 };
             } else {
                 return switch (i.bit_width) {
-                    8 => allocator.dupeZ(u8, "C"),
-                    16 => allocator.dupeZ(u8, "S"),
-                    32 => allocator.dupeZ(u8, "I"),
-                    64 => allocator.dupeZ(u8, "L"),
+                    8 => allocator.dupeSentinel(u8, "C", 0),
+                    16 => allocator.dupeSentinel(u8, "S", 0),
+                    32 => allocator.dupeSentinel(u8, "I", 0),
+                    64 => allocator.dupeSentinel(u8, "L", 0),
                     else => error.UnsupportedType,
                 };
             }
@@ -397,9 +399,9 @@ fn logicalTypeToArrowFormat(allocator: Allocator, lt: format.LogicalType, elem: 
             return fmtZ(allocator, "ts{c}:{s}", .{ unit_char, tz });
         },
         .time => |t| switch (t.unit) {
-            .millis => allocator.dupeZ(u8, "ttm"),
-            .micros => allocator.dupeZ(u8, "ttu"),
-            .nanos => allocator.dupeZ(u8, "ttn"),
+            .millis => allocator.dupeSentinel(u8, "ttm", 0),
+            .micros => allocator.dupeSentinel(u8, "ttu", 0),
+            .nanos => allocator.dupeSentinel(u8, "ttn", 0),
         },
         .decimal => |d| {
             if (elem.type_) |pt| {
@@ -415,24 +417,24 @@ fn logicalTypeToArrowFormat(allocator: Allocator, lt: format.LogicalType, elem: 
 
 fn convertedTypeToArrowFormat(allocator: Allocator, ct: i32, elem: format.SchemaElement) SchemaConvError![:0]u8 {
     return switch (ct) {
-        format.ConvertedType.UTF8 => allocator.dupeZ(u8, "u"),
-        format.ConvertedType.DATE => allocator.dupeZ(u8, "tdD"),
-        format.ConvertedType.TIMESTAMP_MILLIS => allocator.dupeZ(u8, "tsm:"),
-        format.ConvertedType.TIMESTAMP_MICROS => allocator.dupeZ(u8, "tsu:"),
-        format.ConvertedType.TIME_MILLIS => allocator.dupeZ(u8, "ttm"),
-        format.ConvertedType.TIME_MICROS => allocator.dupeZ(u8, "ttu"),
-        format.ConvertedType.INT_8 => allocator.dupeZ(u8, "c"),
-        format.ConvertedType.INT_16 => allocator.dupeZ(u8, "s"),
-        format.ConvertedType.INT_32 => allocator.dupeZ(u8, "i"),
-        format.ConvertedType.INT_64 => allocator.dupeZ(u8, "l"),
-        format.ConvertedType.UINT_8 => allocator.dupeZ(u8, "C"),
-        format.ConvertedType.UINT_16 => allocator.dupeZ(u8, "S"),
-        format.ConvertedType.UINT_32 => allocator.dupeZ(u8, "I"),
-        format.ConvertedType.UINT_64 => allocator.dupeZ(u8, "L"),
-        format.ConvertedType.ENUM => allocator.dupeZ(u8, "u"),
-        format.ConvertedType.JSON => allocator.dupeZ(u8, "u"),
-        format.ConvertedType.BSON => allocator.dupeZ(u8, "z"),
-        format.ConvertedType.INTERVAL => allocator.dupeZ(u8, "w:12"),
+        format.ConvertedType.UTF8 => allocator.dupeSentinel(u8, "u", 0),
+        format.ConvertedType.DATE => allocator.dupeSentinel(u8, "tdD", 0),
+        format.ConvertedType.TIMESTAMP_MILLIS => allocator.dupeSentinel(u8, "tsm:", 0),
+        format.ConvertedType.TIMESTAMP_MICROS => allocator.dupeSentinel(u8, "tsu:", 0),
+        format.ConvertedType.TIME_MILLIS => allocator.dupeSentinel(u8, "ttm", 0),
+        format.ConvertedType.TIME_MICROS => allocator.dupeSentinel(u8, "ttu", 0),
+        format.ConvertedType.INT_8 => allocator.dupeSentinel(u8, "c", 0),
+        format.ConvertedType.INT_16 => allocator.dupeSentinel(u8, "s", 0),
+        format.ConvertedType.INT_32 => allocator.dupeSentinel(u8, "i", 0),
+        format.ConvertedType.INT_64 => allocator.dupeSentinel(u8, "l", 0),
+        format.ConvertedType.UINT_8 => allocator.dupeSentinel(u8, "C", 0),
+        format.ConvertedType.UINT_16 => allocator.dupeSentinel(u8, "S", 0),
+        format.ConvertedType.UINT_32 => allocator.dupeSentinel(u8, "I", 0),
+        format.ConvertedType.UINT_64 => allocator.dupeSentinel(u8, "L", 0),
+        format.ConvertedType.ENUM => allocator.dupeSentinel(u8, "u", 0),
+        format.ConvertedType.JSON => allocator.dupeSentinel(u8, "u", 0),
+        format.ConvertedType.BSON => allocator.dupeSentinel(u8, "z", 0),
+        format.ConvertedType.INTERVAL => allocator.dupeSentinel(u8, "w:12", 0),
         format.ConvertedType.DECIMAL => blk: {
             const p = elem.precision orelse 0;
             const s = elem.scale orelse 0;
@@ -445,13 +447,13 @@ fn convertedTypeToArrowFormat(allocator: Allocator, ct: i32, elem: format.Schema
 fn physicalTypeToArrowFormat(allocator: Allocator, elem: format.SchemaElement) SchemaConvError![:0]u8 {
     const pt = elem.type_ orelse return error.InvalidSchema;
     return switch (pt) {
-        .boolean => allocator.dupeZ(u8, "b"),
-        .int32 => allocator.dupeZ(u8, "i"),
-        .int64 => allocator.dupeZ(u8, "l"),
-        .int96 => allocator.dupeZ(u8, "tsn:"),
-        .float => allocator.dupeZ(u8, "f"),
-        .double => allocator.dupeZ(u8, "g"),
-        .byte_array => allocator.dupeZ(u8, "z"),
+        .boolean => allocator.dupeSentinel(u8, "b", 0),
+        .int32 => allocator.dupeSentinel(u8, "i", 0),
+        .int64 => allocator.dupeSentinel(u8, "l", 0),
+        .int96 => allocator.dupeSentinel(u8, "tsn:", 0),
+        .float => allocator.dupeSentinel(u8, "f", 0),
+        .double => allocator.dupeSentinel(u8, "g", 0),
+        .byte_array => allocator.dupeSentinel(u8, "z", 0),
         .fixed_len_byte_array => blk: {
             const tl = elem.type_length orelse return error.InvalidSchema;
             break :blk fmtZ(allocator, "w:{d}", .{tl});
@@ -616,6 +618,7 @@ const ArrowFormatInfo = struct {
         }
         if (fmt.len >= 2 and fmt[0] == 'w' and fmt[1] == ':') {
             const type_length = std.fmt.parseInt(i32, fmt[2..], 10) catch return error.InvalidSchema;
+            if (type_length <= 0) return error.InvalidSchema;
             const logical: ?format.LogicalType = if (type_length == 16) .uuid else null;
             return .{ .physical_type = .fixed_len_byte_array, .type_length = type_length, .logical_type = logical };
         }
@@ -629,6 +632,7 @@ const ArrowFormatInfo = struct {
 
             if (parts.next()) |bw_str| {
                 const bw = std.fmt.parseInt(i32, bw_str, 10) catch return error.InvalidSchema;
+                if (bw <= 0) return error.InvalidSchema;
                 return .{ .physical_type = .fixed_len_byte_array, .type_length = bw, .logical_type = .{ .decimal = .{ .precision = precision, .scale = scale } } };
             } else if (precision <= 9) {
                 return .{ .physical_type = .int32, .logical_type = .{ .decimal = .{ .precision = precision, .scale = scale } } };
@@ -650,10 +654,12 @@ const ArrowFormatInfo = struct {
             .float => .{ .float = .{} },
             .double => .{ .double = .{} },
             .byte_array => .{ .byte_array = .{ .logical = self.logicalForSchema() } },
-            .fixed_len_byte_array => .{ .fixed_len_byte_array = .{
-                .len = safe.castTo(u32, self.type_length orelse 0) catch unreachable, // type_length from parsed format
-                .logical = self.logicalForSchema(),
-            } },
+            .fixed_len_byte_array => .{
+                .fixed_len_byte_array = .{
+                    .len = safe.castTo(u32, self.type_length orelse 0) catch unreachable, // parse rejects non-positive widths
+                    .logical = self.logicalForSchema(),
+                },
+            },
             .int96 => .{ .int64 = .{} },
         };
     }
@@ -1746,7 +1752,6 @@ fn readColumnAsArrow(
     all_values.deinit(allocator);
     return result;
 }
-
 
 // ============================================================================
 // Value[] → ArrowArray conversion
@@ -3733,6 +3738,10 @@ fn writeFixedByteArrayColumn(
 // Tests
 // ============================================================================
 
+test "arrow format rejects negative fixed width" {
+    try std.testing.expectError(error.InvalidSchema, ArrowFormatInfo.parse("w:-1"));
+}
+
 test "schema conversion - flat types" {
     const allocator = std.testing.allocator;
 
@@ -4210,7 +4219,7 @@ test "round-trip: LIST of strings" {
     try writer.writeListColumn([]const u8, 0, &.{
         .{ .value = &.{ .{ .value = "alice" }, .{ .value = "bob" } } },
         .null_value,
-        .{ .value = &.{ .{ .value = "charlie" } } },
+        .{ .value = &.{.{ .value = "charlie" }} },
     });
 
     try writer.close();
@@ -4426,14 +4435,27 @@ test "round-trip: arrow write then read - timestamps and date32" {
 
     var tss_buffers = [_]?*anyopaque{ @ptrCast(tss_validity.ptr), @ptrCast(tss_data.ptr) };
     const tss_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &tss_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &tss_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const tss_sch = ArrowSchema{
-        .format = "tss:UTC", .name = "ts_sec", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tss:UTC",
+        .name = "ts_sec",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Timestamp millis (tsm:UTC)
@@ -4450,14 +4472,27 @@ test "round-trip: arrow write then read - timestamps and date32" {
 
     var tsm_buffers = [_]?*anyopaque{ @ptrCast(tsm_validity.ptr), @ptrCast(tsm_data.ptr) };
     const tsm_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &tsm_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &tsm_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const tsm_sch = ArrowSchema{
-        .format = "tsm:UTC", .name = "ts_ms", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tsm:UTC",
+        .name = "ts_ms",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Timestamp micros (tsu:UTC)
@@ -4474,14 +4509,27 @@ test "round-trip: arrow write then read - timestamps and date32" {
 
     var tsu_buffers = [_]?*anyopaque{ @ptrCast(tsu_validity.ptr), @ptrCast(tsu_data.ptr) };
     const tsu_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &tsu_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &tsu_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const tsu_sch = ArrowSchema{
-        .format = "tsu:UTC", .name = "ts_us", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tsu:UTC",
+        .name = "ts_us",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Date32 (tdD)
@@ -4499,14 +4547,27 @@ test "round-trip: arrow write then read - timestamps and date32" {
 
     var d32_buffers = [_]?*anyopaque{ @ptrCast(d32_validity.ptr), @ptrCast(d32_data.ptr) };
     const d32_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &d32_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &d32_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const d32_sch = ArrowSchema{
-        .format = "tdD", .name = "date_col", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tdD",
+        .name = "date_col",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Write to Parquet
@@ -4604,30 +4665,55 @@ test "round-trip: arrow write LIST of timestamp seconds" {
 
     var child_buffers = [_]?*anyopaque{ @ptrCast(child_validity.ptr), @ptrCast(child_data_mem.ptr) };
     var child_arr_val = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &child_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &child_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     var children_ptrs = [_]*ArrowArray{&child_arr_val};
     var parent_buffers = [_]?*anyopaque{ @ptrCast(parent_validity.ptr), @ptrCast(offsets_mem.ptr) };
     const list_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 1, .buffers = &parent_buffers, .children = @ptrCast(&children_ptrs),
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 1,
+        .buffers = &parent_buffers,
+        .children = @ptrCast(&children_ptrs),
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const child_sch = ArrowSchema{
-        .format = "tss:UTC", .name = "item", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tss:UTC",
+        .name = "item",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     var child_sch_ptrs = [_]*const ArrowSchema{&child_sch};
     const list_sch = ArrowSchema{
-        .format = "+l", .name = "ts_list", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 1,
-        .children = @constCast(@ptrCast(&child_sch_ptrs)),
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "+l",
+        .name = "ts_list",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 1,
+        .children = @ptrCast(@constCast(&child_sch_ptrs)),
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const arrays = [_]ArrowArray{list_arr};
@@ -4693,9 +4779,16 @@ test "round-trip: arrow write STRUCT with timestamp seconds field" {
 
     var str_buffers = [_]?*anyopaque{ @ptrCast(str_validity.ptr), @ptrCast(str_offsets_mem.ptr), @ptrCast(@constCast(str_data.ptr)) };
     var str_arr = ArrowArray{
-        .length = 2, .null_count = 0, .offset = 0, .n_buffers = 3,
-        .n_children = 0, .buffers = &str_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 2,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 3,
+        .n_children = 0,
+        .buffers = &str_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Child 1: ts (timestamp seconds)
@@ -4711,36 +4804,66 @@ test "round-trip: arrow write STRUCT with timestamp seconds field" {
 
     var ts_buffers = [_]?*anyopaque{ @ptrCast(ts_validity.ptr), @ptrCast(ts_data_mem.ptr) };
     var ts_arr = ArrowArray{
-        .length = 2, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &ts_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 2,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &ts_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     var struct_child_ptrs = [_]*ArrowArray{ &str_arr, &ts_arr };
     var struct_buffers = [_]?*anyopaque{ @ptrCast(struct_validity.ptr), null };
     const struct_arr = ArrowArray{
-        .length = 2, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 2, .buffers = &struct_buffers,
+        .length = 2,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 2,
+        .buffers = &struct_buffers,
         .children = @ptrCast(&struct_child_ptrs),
-        .dictionary = null, .release = null, .private_data = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const str_sch = ArrowSchema{
-        .format = "u", .name = "label", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "u",
+        .name = "label",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const ts_sch = ArrowSchema{
-        .format = "tss:UTC", .name = "ts", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tss:UTC",
+        .name = "ts",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     var struct_child_sch_ptrs = [_]*const ArrowSchema{ &str_sch, &ts_sch };
     const struct_sch = ArrowSchema{
-        .format = "+s", .name = "event", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 2,
-        .children = @constCast(@ptrCast(&struct_child_sch_ptrs)),
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "+s",
+        .name = "event",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 2,
+        .children = @ptrCast(@constCast(&struct_child_sch_ptrs)),
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const arr_slice = [_]ArrowArray{struct_arr};
@@ -4792,14 +4915,27 @@ test "round-trip: arrow write then read - widened integer types" {
 
     var i8_buffers = [_]?*anyopaque{ @ptrCast(i8_validity.ptr), @ptrCast(i8_data.ptr) };
     const i8_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &i8_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &i8_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const i8_sch = ArrowSchema{
-        .format = "c", .name = "i8_col", .metadata = null,
-        .flags = 0, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "c",
+        .name = "i8_col",
+        .metadata = null,
+        .flags = 0,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // u8 column (C -> i32)
@@ -4815,14 +4951,27 @@ test "round-trip: arrow write then read - widened integer types" {
 
     var u8_buffers = [_]?*anyopaque{ @ptrCast(u8_validity.ptr), @ptrCast(u8_data.ptr) };
     const u8_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &u8_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &u8_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const u8_sch = ArrowSchema{
-        .format = "C", .name = "u8_col", .metadata = null,
-        .flags = 0, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "C",
+        .name = "u8_col",
+        .metadata = null,
+        .flags = 0,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // u32 column (I -> i64)
@@ -4839,14 +4988,27 @@ test "round-trip: arrow write then read - widened integer types" {
 
     var u32_buffers = [_]?*anyopaque{ @ptrCast(u32_validity.ptr), @ptrCast(u32_data.ptr) };
     const u32_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &u32_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &u32_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const u32_sch = ArrowSchema{
-        .format = "I", .name = "u32_col", .metadata = null,
-        .flags = 0, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "I",
+        .name = "u32_col",
+        .metadata = null,
+        .flags = 0,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Write
@@ -4915,14 +5077,27 @@ test "round-trip: arrow write then read - boolean" {
 
     var buffers = [_]?*anyopaque{ @ptrCast(validity.ptr), @ptrCast(bool_data.ptr) };
     const bool_arr = ArrowArray{
-        .length = 4, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 4,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const bool_sch = ArrowSchema{
-        .format = "b", .name = "flag", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "b",
+        .name = "flag",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const col_defs = [_]ColumnDef{
@@ -4984,14 +5159,27 @@ test "round-trip: arrow write then read - large utf8" {
 
     var buffers = [_]?*anyopaque{ @ptrCast(validity.ptr), @ptrCast(offsets_mem.ptr), @ptrCast(@constCast(str_data.ptr)) };
     const large_str_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 3,
-        .n_children = 0, .buffers = &buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 3,
+        .n_children = 0,
+        .buffers = &buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const large_str_sch = ArrowSchema{
-        .format = "U", .name = "text", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "U",
+        .name = "text",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const col_defs = [_]ColumnDef{
@@ -5055,14 +5243,27 @@ test "round-trip: arrow write then read - decimal int32 and int64 backed" {
 
     var d9_buffers = [_]?*anyopaque{ @ptrCast(d9_validity.ptr), @ptrCast(d9_data.ptr) };
     const d9_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &d9_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &d9_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const d9_sch = ArrowSchema{
-        .format = "d:9,2", .name = "price", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "d:9,2",
+        .name = "price",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Decimal(18,4) backed by int64
@@ -5079,14 +5280,27 @@ test "round-trip: arrow write then read - decimal int32 and int64 backed" {
 
     var d18_buffers = [_]?*anyopaque{ @ptrCast(d18_validity.ptr), @ptrCast(d18_data.ptr) };
     const d18_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &d18_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &d18_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const d18_sch = ArrowSchema{
-        .format = "d:18,4", .name = "amount", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "d:18,4",
+        .name = "amount",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const col_defs = [_]ColumnDef{
@@ -5146,14 +5360,27 @@ test "round-trip: arrow write then read - date64" {
 
     var buffers = [_]?*anyopaque{ @ptrCast(validity.ptr), @ptrCast(data_mem.ptr) };
     const d64_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const d64_sch = ArrowSchema{
-        .format = "tdm", .name = "date_col", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tdm",
+        .name = "date_col",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const col_defs = [_]ColumnDef{
@@ -5207,14 +5434,27 @@ test "round-trip: arrow write then read - time32 seconds and millis" {
 
     var tts_buffers = [_]?*anyopaque{ @ptrCast(tts_validity.ptr), @ptrCast(tts_data.ptr) };
     const tts_arr = ArrowArray{
-        .length = 3, .null_count = 0, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &tts_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &tts_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const tts_sch = ArrowSchema{
-        .format = "tts", .name = "time_sec", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "tts",
+        .name = "time_sec",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     // Time32 millis (ttm -> passthrough)
@@ -5232,14 +5472,27 @@ test "round-trip: arrow write then read - time32 seconds and millis" {
 
     var ttm_buffers = [_]?*anyopaque{ @ptrCast(ttm_validity.ptr), @ptrCast(ttm_data.ptr) };
     const ttm_arr = ArrowArray{
-        .length = 3, .null_count = 1, .offset = 0, .n_buffers = 2,
-        .n_children = 0, .buffers = &ttm_buffers, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .length = 3,
+        .null_count = 1,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = &ttm_buffers,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
     const ttm_sch = ArrowSchema{
-        .format = "ttm", .name = "time_ms", .metadata = null,
-        .flags = arrow.ARROW_FLAG_NULLABLE, .n_children = 0, .children = null,
-        .dictionary = null, .release = null, .private_data = null,
+        .format = "ttm",
+        .name = "time_ms",
+        .metadata = null,
+        .flags = arrow.ARROW_FLAG_NULLABLE,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
     };
 
     const col_defs = [_]ColumnDef{

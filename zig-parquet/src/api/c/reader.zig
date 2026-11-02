@@ -15,7 +15,7 @@ const ArrowArray = handles.ArrowArray;
 const ReaderHandle = handles.ReaderHandle;
 
 const ZP_OK = err.ZP_OK;
-const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 /// Open a Parquet reader from an in-memory buffer.
 ///

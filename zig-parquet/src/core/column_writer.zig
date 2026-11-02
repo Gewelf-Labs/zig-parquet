@@ -17,7 +17,6 @@ const statistics = @import("statistics.zig");
 const page_index_writer = @import("page_index_writer.zig");
 const safe = @import("safe.zig");
 const build_options = @import("build_options");
-const crc = std.hash.crc;
 
 const Optional = types.Optional;
 
@@ -39,7 +38,8 @@ fn DictHashContext(comptime K: type) type {
 
 /// Compute CRC32 checksum for page data (per Parquet spec, covers compressed data)
 pub fn computePageCrc(data: []const u8) i32 {
-    return @bitCast(crc.Crc32.hash(data));
+    const crc32 = @import("crc32.zig");
+    return @bitCast(crc32.hash(data));
 }
 
 pub const ColumnWriteError = error{
@@ -136,12 +136,6 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
         return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
     }
 
-    // Compute statistics using unified API
-    var stats_builder = statistics.StatisticsBuilder(T){};
-    stats_builder.updateOptional(values);
-    var stats = stats_builder.build(allocator) catch return error.OutOfMemory;
-    errdefer if (stats) |s| freeStatistics(allocator, s);
-
     // Build dictionary from non-null values
     var unique_map = std.HashMap(T, u32, DictHashContext(T), std.hash_map.default_max_load_percentage).init(allocator);
     defer unique_map.deinit();
@@ -159,24 +153,25 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
     var idx: usize = 0;
     for (values) |v| {
         if (v != .null_value) {
-            const val = v.value;
-            if (unique_map.get(val)) |dict_idx| {
-                indices[idx] = dict_idx;
-            } else {
-                const new_idx: u32 = try safe.castTo(u32, dict_values.items.len);
-                unique_map.put(val, new_idx) catch return error.OutOfMemory;
-                dict_values.append(allocator, val) catch return error.OutOfMemory;
-                indices[idx] = new_idx;
+            const gop = unique_map.getOrPut(v.value) catch return error.OutOfMemory;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try safe.castTo(u32, dict_values.items.len);
+                dict_values.append(allocator, v.value) catch return error.OutOfMemory;
+                // The dictionary only grows, so its first excess is the same decision
+                // the old post-loop check made: fall back now instead of hashing on.
+                if (dictionary_size_limit) |limit| {
+                    if (dict_values.items.len * @sizeOf(T) > limit) {
+                        return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
+                    }
+                }
             }
+            indices[idx] = gop.value_ptr.*;
             idx += 1;
 
-            // Check cardinality threshold early abort
-            if (dictionary_cardinality_threshold) |threshold| {
+            if (dictionary_cardinality_threshold) |cardinality_limit| {
                 if (idx >= 1024) {
                     const ratio = @as(f32, @floatFromInt(dict_values.items.len)) / @as(f32, @floatFromInt(idx));
-                    if (ratio > threshold) {
-                        if (stats) |s| freeStatistics(allocator, s);
-                        stats = null;
+                    if (ratio > cardinality_limit) {
                         return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
                     }
                 }
@@ -186,15 +181,11 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
 
     const dict_size = dict_values.items.len;
 
-    // Check dictionary size limit
-    const dict_bytes = dict_size * @sizeOf(T);
-    if (dictionary_size_limit) |limit| {
-        if (dict_bytes > limit) {
-            if (stats) |s| freeStatistics(allocator, s);
-            stats = null;
-            return writeColumnChunkOptionalWithPathArray(T, allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
-        }
-    }
+    // Statistics are only needed once the dictionary is kept (fallbacks compute their own).
+    var stats_builder = statistics.StatisticsBuilder(T){};
+    stats_builder.updateOptional(values);
+    const stats = stats_builder.build(allocator) catch return error.OutOfMemory;
+    errdefer if (stats) |s| freeStatistics(allocator, s);
 
     // Write dictionary page (PLAIN encoded)
     const bytes_per_value = @sizeOf(T);
@@ -286,29 +277,12 @@ pub fn writeColumnChunkDictOptionalWithPathArray(
         defer allocator.free(rle_data);
 
         // Optional columns always need definition levels, even when all values are non-null
-        const data_page_uncompressed = if (is_optional) blk: {
-            var page_def_levels = allocator.alloc(bool, page_values.len) catch return error.OutOfMemory;
-            defer allocator.free(page_def_levels);
-
-            for (page_values, 0..) |v, i| {
-                page_def_levels[i] = v != .null_value;
-            }
-
-            const def_level_data = rle_encoder.encodeDefLevelsWithLength(allocator, page_def_levels) catch return error.OutOfMemory;
-            defer allocator.free(def_level_data);
-
-            const page_data = allocator.alloc(u8, def_level_data.len + 1 + rle_data.len) catch return error.OutOfMemory;
-            @memcpy(page_data[0..def_level_data.len], def_level_data);
-            page_data[def_level_data.len] = bit_width;
-            @memcpy(page_data[def_level_data.len + 1 ..], rle_data);
-            break :blk page_data;
-        } else blk: {
-            const page_data = allocator.alloc(u8, 1 + rle_data.len) catch return error.OutOfMemory;
-            page_data[0] = bit_width;
-            @memcpy(page_data[1..], rle_data);
-            break :blk page_data;
-        };
-        defer allocator.free(data_page_uncompressed);
+        var page_buf: std.ArrayList(u8) = .empty;
+        defer page_buf.deinit(allocator);
+        if (is_optional) try rle_encoder.appendDefLevelsWithLength(T, &page_buf, allocator, page_values);
+        page_buf.append(allocator, bit_width) catch return error.OutOfMemory;
+        page_buf.appendSlice(allocator, rle_data) catch return error.OutOfMemory;
+        const data_page_uncompressed = page_buf.items;
 
         // Compress data page if needed
         const data_compressed: []const u8 = if (codec == .uncompressed)
@@ -406,12 +380,6 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
     }
 
-    // Compute statistics using unified API
-    var stats_builder = statistics.ByteArrayStatisticsBuilder.init(allocator);
-    stats_builder.updateOptional(values) catch return error.OutOfMemory;
-    var stats = stats_builder.build();
-    errdefer if (stats) |s| freeStatistics(allocator, s);
-
     // Build dictionary from non-null values
     var unique_map = std.StringHashMap(u32).init(allocator);
     defer unique_map.deinit();
@@ -432,23 +400,26 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         if (v != .null_value) {
             const val = v.value;
             if (val.len > std.math.maxInt(i32)) return error.ValueTooLarge;
-            if (unique_map.get(val)) |dict_idx| {
-                indices[idx] = dict_idx;
-            } else {
-                const new_idx: u32 = try safe.castTo(u32, dict_values.items.len);
-                unique_map.put(val, new_idx) catch return error.OutOfMemory;
+            const gop = unique_map.getOrPut(val) catch return error.OutOfMemory;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try safe.castTo(u32, dict_values.items.len);
                 dict_values.append(allocator, val) catch return error.OutOfMemory;
                 dict_bytes += 4 + val.len;
-                indices[idx] = new_idx;
+                // The dictionary only grows, so its first excess is the same decision
+                // the old post-loop check made: fall back now instead of hashing on.
+                if (dictionary_size_limit) |limit| {
+                    if (dict_bytes > limit) {
+                        return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
+                    }
+                }
             }
+            indices[idx] = gop.value_ptr.*;
             idx += 1;
 
-            if (dictionary_cardinality_threshold) |threshold| {
+            if (dictionary_cardinality_threshold) |cardinality_limit| {
                 if (idx >= 1024) {
                     const ratio = @as(f32, @floatFromInt(dict_values.items.len)) / @as(f32, @floatFromInt(idx));
-                    if (ratio > threshold) {
-                        if (stats) |s| freeStatistics(allocator, s);
-                        stats = null;
+                    if (ratio > cardinality_limit) {
                         return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
                     }
                 }
@@ -458,14 +429,12 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
 
     const dict_size = dict_values.items.len;
 
-    // Check dictionary size limit
-    if (dictionary_size_limit) |limit| {
-        if (dict_bytes > limit) {
-            if (stats) |s| freeStatistics(allocator, s);
-            stats = null;
-            return writeColumnChunkByteArrayOptionalWithPathArray(allocator, output, path_in_schema, values, is_optional, start_offset, codec, write_page_checksum);
-        }
-    }
+    // Statistics are only needed once the dictionary is kept (fallbacks compute their own).
+    var stats_builder = statistics.ByteArrayStatisticsBuilder.init(allocator);
+    defer stats_builder.deinit();
+    stats_builder.updateOptional(values) catch return error.OutOfMemory;
+    const stats = stats_builder.build();
+    errdefer if (stats) |s| freeStatistics(allocator, s);
 
     // Write dictionary page (length-prefixed byte arrays)
     const dict_data = allocator.alloc(u8, dict_bytes) catch return error.OutOfMemory;
@@ -552,29 +521,12 @@ pub fn writeColumnChunkByteArrayDictOptionalWithPathArray(
         defer allocator.free(rle_data);
 
         // Optional columns always need definition levels, even when all values are non-null
-        const data_page_uncompressed = if (is_optional) blk: {
-            var page_def_levels = allocator.alloc(bool, page_values.len) catch return error.OutOfMemory;
-            defer allocator.free(page_def_levels);
-
-            for (page_values, 0..) |v, i| {
-                page_def_levels[i] = v != .null_value;
-            }
-
-            const def_level_data = rle_encoder.encodeDefLevelsWithLength(allocator, page_def_levels) catch return error.OutOfMemory;
-            defer allocator.free(def_level_data);
-
-            const page_data = allocator.alloc(u8, def_level_data.len + 1 + rle_data.len) catch return error.OutOfMemory;
-            @memcpy(page_data[0..def_level_data.len], def_level_data);
-            page_data[def_level_data.len] = bit_width;
-            @memcpy(page_data[def_level_data.len + 1 ..], rle_data);
-            break :blk page_data;
-        } else blk: {
-            const page_data = allocator.alloc(u8, 1 + rle_data.len) catch return error.OutOfMemory;
-            page_data[0] = bit_width;
-            @memcpy(page_data[1..], rle_data);
-            break :blk page_data;
-        };
-        defer allocator.free(data_page_uncompressed);
+        var page_buf: std.ArrayList(u8) = .empty;
+        defer page_buf.deinit(allocator);
+        if (is_optional) try rle_encoder.appendDefLevelsWithLength([]const u8, &page_buf, allocator, page_values);
+        page_buf.append(allocator, bit_width) catch return error.OutOfMemory;
+        page_buf.appendSlice(allocator, rle_data) catch return error.OutOfMemory;
+        const data_page_uncompressed = page_buf.items;
 
         // Compress data page if needed
         const data_compressed: []const u8 = if (codec == .uncompressed)
@@ -663,8 +615,16 @@ pub fn writeColumnChunkFixedByteArrayOptionalWithPathArray(
     write_page_checksum: bool,
 ) ColumnWriteError!ColumnChunkResult {
     return writeColumnChunkFixedByteArrayOptionalWithPathArrayAndEncoding(
-        allocator, output, path_in_schema, values, fixed_len, is_optional,
-        start_offset, codec, .plain, write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        values,
+        fixed_len,
+        is_optional,
+        start_offset,
+        codec,
+        .plain,
+        write_page_checksum,
     );
 }
 
@@ -943,17 +903,32 @@ fn writeColumnChunkFromValuesTyped(
     // Dictionary path
     if (effective_encoding == null and opts.use_dictionary) {
         return writeColumnChunkFromValuesTypedDict(
-            T, allocator, output, path_in_schema,
-            typed_values.items, def_levels, rep_levels,
-            max_def_level, max_rep_level, start_offset, codec, opts,
+            T,
+            allocator,
+            output,
+            path_in_schema,
+            typed_values.items,
+            def_levels,
+            rep_levels,
+            max_def_level,
+            max_rep_level,
+            start_offset,
+            codec,
+            opts,
         );
     }
 
     const enc = effective_encoding orelse .plain;
 
     var page_result = page_writer.writeDataPageWithLevelsAndEncoding(
-        allocator, T, typed_values.items,
-        def_levels, rep_levels, max_def_level, max_rep_level, enc,
+        allocator,
+        T,
+        typed_values.items,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
+        enc,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -965,9 +940,16 @@ fn writeColumnChunkFromValuesTyped(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, physical_type,
-        page_result.data, page_result.num_values,
-        start_offset, codec, enc, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        physical_type,
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        enc,
+        opts.write_page_checksum,
     );
     var stats_builder = statistics.StatisticsBuilder(T){};
     stats_builder.update(typed_values.items);
@@ -1008,17 +990,30 @@ fn writeColumnChunkFromValuesBytes(
     // Dictionary path
     if (opts.encoding == null and opts.use_dictionary) {
         return writeColumnChunkFromValuesBytesDict(
-            allocator, output, path_in_schema,
-            byte_values.items, def_levels, rep_levels,
-            max_def_level, max_rep_level, start_offset, codec, opts,
+            allocator,
+            output,
+            path_in_schema,
+            byte_values.items,
+            def_levels,
+            rep_levels,
+            max_def_level,
+            max_rep_level,
+            start_offset,
+            codec,
+            opts,
         );
     }
 
     const enc = opts.encoding orelse .plain;
 
     var page_result = page_writer.writeDataPageWithLevelsByteArrayWithEncoding(
-        allocator, byte_values.items,
-        def_levels, rep_levels, max_def_level, max_rep_level, enc,
+        allocator,
+        byte_values.items,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
+        enc,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1030,13 +1025,20 @@ fn writeColumnChunkFromValuesBytes(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, .byte_array,
-        page_result.data, page_result.num_values,
-        start_offset, codec, enc, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        .byte_array,
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        enc,
+        opts.write_page_checksum,
     );
     var byte_stats = statistics.ByteArrayStatisticsBuilder.init(allocator);
     defer byte_stats.deinit();
-    byte_stats.update(byte_values.items) catch {};
+    try byte_stats.update(byte_values.items);
     byte_stats.addNulls(countNullsFromLevelDiff(def_levels.len, byte_values.items.len));
     result.metadata.statistics = byte_stats.build();
     return result;
@@ -1079,8 +1081,14 @@ fn writeColumnChunkFromValuesFixedBytes(
     const enc = opts.encoding orelse .plain;
 
     var page_result = page_writer.writeDataPageWithLevelsFixedByteArrayWithEncoding(
-        allocator, byte_values.items, fixed_len,
-        def_levels, rep_levels, max_def_level, max_rep_level, enc,
+        allocator,
+        byte_values.items,
+        fixed_len,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
+        enc,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1092,13 +1100,20 @@ fn writeColumnChunkFromValuesFixedBytes(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, .fixed_len_byte_array,
-        page_result.data, page_result.num_values,
-        start_offset, codec, enc, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        .fixed_len_byte_array,
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        enc,
+        opts.write_page_checksum,
     );
     var fixed_stats = statistics.ByteArrayStatisticsBuilder.init(allocator);
     defer fixed_stats.deinit();
-    fixed_stats.update(byte_values.items) catch {};
+    try fixed_stats.update(byte_values.items);
     fixed_stats.addNulls(countNullsFromLevelDiff(def_levels.len, byte_values.items.len));
     result.metadata.statistics = fixed_stats.build();
     return result;
@@ -1129,8 +1144,13 @@ fn writeColumnChunkFromValuesBool(
     }
 
     var page_result = page_writer.writeDataPageWithLevels(
-        allocator, bool, bool_values.items,
-        def_levels, rep_levels, max_def_level, max_rep_level,
+        allocator,
+        bool,
+        bool_values.items,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1142,9 +1162,16 @@ fn writeColumnChunkFromValuesBool(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, .boolean,
-        page_result.data, page_result.num_values,
-        start_offset, codec, .plain, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        .boolean,
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        .plain,
+        opts.write_page_checksum,
     );
     var bool_stats = statistics.StatisticsBuilder(bool){};
     bool_stats.update(bool_values.items);
@@ -1249,7 +1276,13 @@ fn writeColumnChunkFromValuesTypedDict(
 ) ColumnWriteError!ColumnChunkResult {
     if (typed_values.len == 0) {
         var page_result = page_writer.writeDataPageWithLevels(
-            allocator, T, typed_values, def_levels, rep_levels, max_def_level, max_rep_level,
+            allocator,
+            T,
+            typed_values,
+            def_levels,
+            rep_levels,
+            max_def_level,
+            max_rep_level,
         ) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1260,9 +1293,16 @@ fn writeColumnChunkFromValuesTypedDict(
         };
         defer page_result.deinit(allocator);
         return writeColumnChunkWithPath(
-            allocator, output, path_in_schema, physicalTypeOf(T),
-            page_result.data, page_result.num_values,
-            start_offset, codec, .plain, opts.write_page_checksum,
+            allocator,
+            output,
+            path_in_schema,
+            physicalTypeOf(T),
+            page_result.data,
+            page_result.num_values,
+            start_offset,
+            codec,
+            .plain,
+            opts.write_page_checksum,
         );
     }
 
@@ -1289,9 +1329,18 @@ fn writeColumnChunkFromValuesTypedDict(
                 const ratio = @as(f32, @floatFromInt(dict_values.items.len)) / @as(f32, @floatFromInt(idx));
                 if (ratio > threshold) {
                     return writeColumnChunkFromValuesTypedPlainFallback(
-                        T, allocator, output, path_in_schema, typed_values,
-                        def_levels, rep_levels, max_def_level, max_rep_level,
-                        start_offset, codec, opts,
+                        T,
+                        allocator,
+                        output,
+                        path_in_schema,
+                        typed_values,
+                        def_levels,
+                        rep_levels,
+                        max_def_level,
+                        max_rep_level,
+                        start_offset,
+                        codec,
+                        opts,
                     );
                 }
             }
@@ -1305,9 +1354,18 @@ fn writeColumnChunkFromValuesTypedDict(
     if (opts.dictionary_size_limit) |limit| {
         if (dict_byte_count > limit) {
             return writeColumnChunkFromValuesTypedPlainFallback(
-                T, allocator, output, path_in_schema, typed_values,
-                def_levels, rep_levels, max_def_level, max_rep_level,
-                start_offset, codec, opts,
+                T,
+                allocator,
+                output,
+                path_in_schema,
+                typed_values,
+                def_levels,
+                rep_levels,
+                max_def_level,
+                max_rep_level,
+                start_offset,
+                codec,
+                opts,
             );
         }
     }
@@ -1498,8 +1556,14 @@ fn writeColumnChunkFromValuesTypedPlainFallback(
     };
 
     var page_result = page_writer.writeDataPageWithLevelsAndEncoding(
-        allocator, T, typed_values,
-        def_levels, rep_levels, max_def_level, max_rep_level, enc,
+        allocator,
+        T,
+        typed_values,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
+        enc,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1511,9 +1575,16 @@ fn writeColumnChunkFromValuesTypedPlainFallback(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, physicalTypeOf(T),
-        page_result.data, page_result.num_values,
-        start_offset, codec, enc, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        physicalTypeOf(T),
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        enc,
+        opts.write_page_checksum,
     );
     var stats_builder = statistics.StatisticsBuilder(T){};
     stats_builder.update(typed_values);
@@ -1538,7 +1609,12 @@ fn writeColumnChunkFromValuesBytesDict(
 ) ColumnWriteError!ColumnChunkResult {
     if (byte_values.len == 0) {
         var page_result = page_writer.writeDataPageWithLevelsByteArray(
-            allocator, byte_values, def_levels, rep_levels, max_def_level, max_rep_level,
+            allocator,
+            byte_values,
+            def_levels,
+            rep_levels,
+            max_def_level,
+            max_rep_level,
         ) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1549,9 +1625,16 @@ fn writeColumnChunkFromValuesBytesDict(
         };
         defer page_result.deinit(allocator);
         return writeColumnChunkWithPath(
-            allocator, output, path_in_schema, .byte_array,
-            page_result.data, page_result.num_values,
-            start_offset, codec, .plain, opts.write_page_checksum,
+            allocator,
+            output,
+            path_in_schema,
+            .byte_array,
+            page_result.data,
+            page_result.num_values,
+            start_offset,
+            codec,
+            .plain,
+            opts.write_page_checksum,
         );
     }
 
@@ -1581,9 +1664,17 @@ fn writeColumnChunkFromValuesBytesDict(
                 const ratio = @as(f32, @floatFromInt(dict_entries.items.len)) / @as(f32, @floatFromInt(idx));
                 if (ratio > threshold) {
                     return writeColumnChunkFromValuesBytesPlainFallback(
-                        allocator, output, path_in_schema, byte_values,
-                        def_levels, rep_levels, max_def_level, max_rep_level,
-                        start_offset, codec, opts,
+                        allocator,
+                        output,
+                        path_in_schema,
+                        byte_values,
+                        def_levels,
+                        rep_levels,
+                        max_def_level,
+                        max_rep_level,
+                        start_offset,
+                        codec,
+                        opts,
                     );
                 }
             }
@@ -1595,9 +1686,17 @@ fn writeColumnChunkFromValuesBytesDict(
     if (opts.dictionary_size_limit) |limit| {
         if (dict_byte_count > limit) {
             return writeColumnChunkFromValuesBytesPlainFallback(
-                allocator, output, path_in_schema, byte_values,
-                def_levels, rep_levels, max_def_level, max_rep_level,
-                start_offset, codec, opts,
+                allocator,
+                output,
+                path_in_schema,
+                byte_values,
+                def_levels,
+                rep_levels,
+                max_def_level,
+                max_rep_level,
+                start_offset,
+                codec,
+                opts,
             );
         }
     }
@@ -1739,7 +1838,7 @@ fn writeColumnChunkFromValuesBytesDict(
 
     var byte_stats = statistics.ByteArrayStatisticsBuilder.init(allocator);
     defer byte_stats.deinit();
-    byte_stats.update(byte_values) catch {};
+    try byte_stats.update(byte_values);
     byte_stats.addNulls(countNullsFromLevelDiff(def_levels.len, byte_values.len));
     const stats = byte_stats.build();
 
@@ -1777,7 +1876,12 @@ fn writeColumnChunkFromValuesBytesPlainFallback(
     opts: NestedEncodingOpts,
 ) ColumnWriteError!ColumnChunkResult {
     var page_result = page_writer.writeDataPageWithLevelsByteArray(
-        allocator, byte_values, def_levels, rep_levels, max_def_level, max_rep_level,
+        allocator,
+        byte_values,
+        def_levels,
+        rep_levels,
+        max_def_level,
+        max_rep_level,
     ) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidFixedLength => return error.InvalidFixedLength,
@@ -1789,13 +1893,20 @@ fn writeColumnChunkFromValuesBytesPlainFallback(
     defer page_result.deinit(allocator);
 
     var result = try writeColumnChunkWithPath(
-        allocator, output, path_in_schema, .byte_array,
-        page_result.data, page_result.num_values,
-        start_offset, codec, .plain, opts.write_page_checksum,
+        allocator,
+        output,
+        path_in_schema,
+        .byte_array,
+        page_result.data,
+        page_result.num_values,
+        start_offset,
+        codec,
+        .plain,
+        opts.write_page_checksum,
     );
     var byte_stats = statistics.ByteArrayStatisticsBuilder.init(allocator);
     defer byte_stats.deinit();
-    byte_stats.update(byte_values) catch {};
+    try byte_stats.update(byte_values);
     byte_stats.addNulls(countNullsFromLevelDiff(def_levels.len, byte_values.len));
     result.metadata.statistics = byte_stats.build();
     return result;
@@ -2639,3 +2750,110 @@ test "compressed column tracks uncompressed vs compressed sizes separately" {
     try std.testing.expect(result.metadata.total_uncompressed_size != result.metadata.total_compressed_size);
 }
 
+// Byte-identity golden for the dictionary writers. Hashes were captured from the
+// pre-refactor code; any change to the bytes these columns produce fails here.
+test "dictionary writers produce golden bytes" {
+    const allocator = std.testing.allocator;
+
+    var ints_low: [1000]Optional(i64) = undefined;
+    for (&ints_low, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i % 10)) * 1000003 };
+    var ints_distinct: [1000]Optional(i64) = undefined;
+    for (&ints_distinct, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i)) * 7919 };
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = .{ .value = pool[i % 50] };
+
+    const got_low = try goldenHashInt64(allocator, &ints_low);
+    const got_distinct = try goldenHashInt64(allocator, &ints_distinct);
+    const got_strs = try goldenHashBytes(allocator, &strs);
+
+    try std.testing.expectEqual(@as(u64, 2422651048465132819), got_low);
+    try std.testing.expectEqual(@as(u64, 16368603390927133427), got_distinct);
+    try std.testing.expectEqual(@as(u64, 14272924328622877458), got_strs);
+}
+
+// Small dictionary_size_limit makes the dictionary writers fall back to PLAIN, so
+// their bytes must equal the PLAIN writers' bytes for the same input.
+test "dictionary writers fall back to PLAIN bytes under a small size limit" {
+    const allocator = std.testing.allocator;
+
+    var ints: [1000]Optional(i64) = undefined;
+    for (&ints, 0..) |*slot, i| slot.* = .{ .value = @as(i64, @intCast(i)) * 7919 };
+    var dict_i64: std.Io.Writer.Allocating = .init(allocator);
+    defer dict_i64.deinit();
+    var plain_i64: std.Io.Writer.Allocating = .init(allocator);
+    defer plain_i64.deinit();
+    var r1 = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &dict_i64.writer, &.{"c"}, &ints, true, 4, .uncompressed, 4000, null, null, false);
+    defer r1.deinit(allocator);
+    var r2 = try writeColumnChunkOptionalWithPathArray(i64, allocator, &plain_i64.writer, &.{"c"}, &ints, true, 4, .uncompressed, false);
+    defer r2.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, plain_i64.writer.buffered(), dict_i64.writer.buffered());
+
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = .{ .value = pool[i % 50] };
+    var dict_str: std.Io.Writer.Allocating = .init(allocator);
+    defer dict_str.deinit();
+    var plain_str: std.Io.Writer.Allocating = .init(allocator);
+    defer plain_str.deinit();
+    var r3 = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &dict_str.writer, &.{"c"}, &strs, true, 4, .uncompressed, 100, null, null, false);
+    defer r3.deinit(allocator);
+    var r4 = try writeColumnChunkByteArrayOptionalWithPathArray(allocator, &plain_str.writer, &.{"c"}, &strs, true, 4, .uncompressed, false);
+    defer r4.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, plain_str.writer.buffered(), dict_str.writer.buffered());
+}
+
+// Multi-page dictionary data (max_page_size 200 => 60 values per page), with nulls.
+// Hashes captured from the pre-change code; the one-buffer page build must keep them.
+test "dictionary writers multi-page golden bytes" {
+    const allocator = std.testing.allocator;
+
+    var ints: [1000]Optional(i64) = undefined;
+    for (&ints, 0..) |*slot, i| slot.* = if (i % 5 == 0) .null_value else .{ .value = @as(i64, @intCast(i % 300)) * 1000003 };
+    const pool = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var p: [50][]const u8 = undefined;
+        for (&p, 0..) |*s, i| s.* = std.fmt.comptimePrint("str-{d}", .{i});
+        break :blk p;
+    };
+    var strs: [1000]Optional([]const u8) = undefined;
+    for (&strs, 0..) |*slot, i| slot.* = if (i % 7 == 0) .null_value else .{ .value = pool[i % 50] };
+
+    var aw1: std.Io.Writer.Allocating = .init(allocator);
+    defer aw1.deinit();
+    var r1 = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &aw1.writer, &.{"golden_col"}, &ints, true, 4, .uncompressed, 1_048_576, null, 200, false);
+    defer r1.deinit(allocator);
+    var aw2: std.Io.Writer.Allocating = .init(allocator);
+    defer aw2.deinit();
+    var r2 = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &aw2.writer, &.{"golden_col"}, &strs, true, 4, .uncompressed, 1_048_576, null, 200, false);
+    defer r2.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u64, 9278448097214148636), std.hash.Wyhash.hash(0, aw1.writer.buffered()));
+    try std.testing.expectEqual(@as(u64, 13697923572161511157), std.hash.Wyhash.hash(0, aw2.writer.buffered()));
+}
+
+fn goldenHashInt64(allocator: std.mem.Allocator, values: []const Optional(i64)) !u64 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var result = try writeColumnChunkDictOptionalWithPathArray(i64, allocator, &aw.writer, &.{"golden_col"}, values, true, 4, .uncompressed, 1_048_576, null, null, false);
+    defer result.deinit(allocator);
+    return std.hash.Wyhash.hash(0, aw.writer.buffered());
+}
+
+fn goldenHashBytes(allocator: std.mem.Allocator, values: []const Optional([]const u8)) !u64 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var result = try writeColumnChunkByteArrayDictOptionalWithPathArray(allocator, &aw.writer, &.{"golden_col"}, values, true, 4, .uncompressed, 1_048_576, null, null, false);
+    defer result.deinit(allocator);
+    return std.hash.Wyhash.hash(0, aw.writer.buffered());
+}

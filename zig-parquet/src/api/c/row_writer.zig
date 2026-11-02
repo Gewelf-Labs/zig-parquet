@@ -29,7 +29,7 @@ const value_mod = @import("../../core/value.zig");
 const BufferTarget = @import("../../io/buffer_target.zig").BufferTarget;
 
 const ZP_OK = err.ZP_OK;
-const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 // ============================================================================
 // Open
@@ -505,10 +505,12 @@ fn schemaNodeFromTypeInfo(handle: *RowWriterHandle, info: TypeInfo) !*const Sche
         .float_ => handle.allocSchemaNode(.{ .float = .{ .logical = info.logical } }),
         .double_ => handle.allocSchemaNode(.{ .double = .{ .logical = info.logical } }),
         .bytes => handle.allocSchemaNode(.{ .byte_array = .{ .logical = info.logical } }),
-        .fixed_bytes => handle.allocSchemaNode(.{ .fixed_len_byte_array = .{
-            .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
-            .logical = info.logical,
-        } }),
+        .fixed_bytes => handle.allocSchemaNode(.{
+            .fixed_len_byte_array = .{
+                .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
+                .logical = info.logical,
+            },
+        }),
         .nested => error.InvalidArgument,
     };
 }

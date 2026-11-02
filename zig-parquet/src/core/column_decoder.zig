@@ -24,9 +24,60 @@ pub const Optional = types.Optional;
 pub const Int96 = types.Int96;
 pub const Value = value_mod.Value;
 
+/// Internal to `DynamicReader`; not part of the public API. This module is
+/// re-exported as `parquet.internals.column_decoder`, but setting this flag from
+/// outside yields `bytes_val` slices that dangle once the caller's page buffers
+/// are freed.
+///
+/// Byte ownership for variable-length BYTE_ARRAY values decoded from PLAIN and
+/// dictionary pages (V1 and V2; not FIXED_LEN_BYTE_ARRAY, decimals or delta
+/// encodings, which always copy).
+///
+/// - `false` (default): each `bytes_val` is a fresh copy made by
+///   `value_mod.dupeBytes`, so it outlives `value_data` and the dictionary.
+/// - `true`: each `bytes_val` is a slice of `value_data` or of the dictionary's
+///   entries (which must then be slices of the dictionary page buffer). The
+///   caller must keep those buffers alive for as long as the values, and must
+///   never free the slices individually. `DynamicReader` sets this only while
+///   `value_mod.bytes_arena_allocator` is set and the page buffers were
+///   allocated from that arena, so borrowed slices live exactly as long as
+///   arena copies would have and `Value.deinit` already skips them.
+///
+/// Every borrowed slice comes from a length-checked decode (`plain.decodeByteArray`
+/// / `PlainDecoder`), the same bounds the copying path relies on.
+pub threadlocal var borrow_bytes: bool = false;
+
+/// Copy `bytes` (or return them as-is when `borrow_bytes` is set).
+inline fn takeBytes(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (borrow_bytes) return bytes;
+    return value_mod.dupeBytes(allocator, bytes);
+}
+
+/// True when decoded byte payloads are individual allocations that the decoder
+/// must free on failure (not borrowed, not in the bytes arena).
+fn ownsBytes() bool {
+    return !borrow_bytes and value_mod.bytes_arena_allocator == null;
+}
+
+/// Free a typed decode result's levels (after a later step failed).
+fn freeLevels(allocator: std.mem.Allocator, def_levels: ?[]u32, rep_levels: ?[]u32) void {
+    if (def_levels) |dl| allocator.free(dl);
+    if (rep_levels) |rl| allocator.free(rl);
+}
+
+/// Free a typed byte-array decode result (after a later step failed).
+fn discardBytesResult(allocator: std.mem.Allocator, r: DecodeResult([]const u8)) void {
+    if (ownsBytes()) for (r.values) |o| switch (o) {
+        .value => |b| allocator.free(b),
+        .null_value => {},
+    };
+    allocator.free(r.values);
+    freeLevels(allocator, r.def_levels, r.rep_levels);
+}
+
 /// Extract and validate bit_width from dictionary-encoded data.
 /// Bit width must be 0-31 to fit in u5 for RLE decoding.
-fn extractBitWidth(data: []const u8, offset: usize) error{InvalidBitWidth, EndOfData}!u5 {
+fn extractBitWidth(data: []const u8, offset: usize) error{ InvalidBitWidth, EndOfData }!u5 {
     if (offset >= data.len) return error.EndOfData;
     const raw = data[offset];
     if (raw > 31) return error.InvalidBitWidth;
@@ -133,6 +184,18 @@ fn decodeColumnWithLevels(
 
     const result = try ctx.allocator.alloc(Optional(T), ctx.num_values);
     errdefer ctx.allocator.free(result);
+    // Byte payloads copied before a failure are owned here: free them unless
+    // they are borrowed or live in the bytes arena. Producers must evaluate the
+    // `try` into a local before `result[i] = .{ .value = ... }`: initializing
+    // the union in place writes the tag before the payload, so a failed `try`
+    // would leave a `.value` slot holding undefined bytes for this errdefer.
+    if (T == []const u8) @memset(result, .{ .null_value = {} });
+    errdefer if (T == []const u8) {
+        if (ownsBytes()) for (result) |o| switch (o) {
+            .value => |b| ctx.allocator.free(b),
+            .null_value => {},
+        };
+    };
 
     var def_levels: ?[]u32 = null;
     var rep_levels: ?[]u32 = null;
@@ -319,7 +382,7 @@ fn decodeOptionalColumnWithLevels(
 
         if (ctx.rep_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const rep_bytes = rle.bitPackedSize(ctx.num_values, rep_bit_width);
+            const rep_bytes = try rle.bitPackedSize(ctx.num_values, rep_bit_width);
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_bytes);
             data_offset += rep_bytes;
             rep_levels_result = try rle.decodeBitPackedLevels(ctx.allocator, rep_levels_data, rep_bit_width, ctx.num_values);
@@ -339,7 +402,7 @@ fn decodeOptionalColumnWithLevels(
 
     if (ctx.def_level_encoding == .bit_packed) {
         // Pure bit-packed: no length prefix
-        const def_bytes = rle.bitPackedSize(ctx.num_values, def_bit_width);
+        const def_bytes = try rle.bitPackedSize(ctx.num_values, def_bit_width);
         const def_levels_data = try safe.slice(value_data, data_offset, def_bytes);
         data_offset += def_bytes;
         def_levels_raw = try rle.decodeBitPackedLevels(ctx.allocator, def_levels_data, def_bit_width, ctx.num_values);
@@ -441,9 +504,11 @@ fn decodeDictStringsWithDefLevels(
             const dict_idx = indices[idx_pos];
             idx_pos += 1;
             if (ctx.string_dict.?.get(dict_idx)) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try takeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, "") };
+                const owned = try takeBytes(ctx.allocator, "");
+                result[i] = .{ .value = owned };
             }
         } else {
             result[i] = .{ .null_value = {} };
@@ -598,7 +663,7 @@ fn decodeDictInt96WithDefLevels(
             if (ctx.int96_dict.?.get(dict_idx)) |bytes| {
                 result[i] = .{ .value = Int96.fromBytes(bytes) };
             } else {
-                result[i] = .{ .value = Int96.fromBytes([_]u8{0} ** 12) };
+                result[i] = .{ .value = Int96.fromBytes(@as([12]u8, @splat(0))) };
             }
         } else {
             result[i] = .{ .null_value = {} };
@@ -627,7 +692,8 @@ fn decodeDictFixedByteArrayWithDefLevels(
             const dict_idx = indices[idx_pos];
             idx_pos += 1;
             if (ctx.fixed_byte_array_dict.?.get(dict_idx)) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try value_mod.dupeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
                 result[i] = .{ .null_value = {} };
             }
@@ -686,19 +752,22 @@ fn decodePlainWithDefLevels(
                     // Fixed-length byte array - no length prefix
                     if (data_offset + fixed_len > value_data.len) return error.EndOfData;
                     const value = value_data[data_offset..][0..fixed_len];
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, value) };
+                    const owned = try value_mod.dupeBytes(ctx.allocator, value);
+                    result[i] = .{ .value = owned };
                     data_offset += fixed_len;
                 } else if (isDecimalIntColumn(ctx)) {
                     // Decimal stored as INT32/INT64: read integer bytes, convert to big-endian
                     const int_size: usize = if (ctx.schema_elem.type_ == .int32) 4 else 8;
-                    result[i] = .{ .value = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size) };
+                    const owned = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size);
+                    result[i] = .{ .value = owned };
                     data_offset += int_size;
                 } else {
                     // Variable-length byte array - has 4-byte length prefix
                     if (data_offset + 4 > value_data.len) return error.EndOfData;
                     const ba = try plain.decodeByteArray(value_data[data_offset..]);
                     if (data_offset + ba.bytes_read > value_data.len) return error.EndOfData;
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, ba.value) };
+                    const owned = try takeBytes(ctx.allocator, ba.value);
+                    result[i] = .{ .value = owned };
                     data_offset += ba.bytes_read;
                 }
             } else if (T == Int96) {
@@ -733,7 +802,8 @@ fn decodeRequiredColumn(
 
         for (0..ctx.num_values) |i| {
             if (ctx.fixed_byte_array_dict.?.get(indices[i])) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try value_mod.dupeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
                 result[i] = .{ .null_value = {} };
             }
@@ -749,9 +819,11 @@ fn decodeRequiredColumn(
 
         for (0..ctx.num_values) |i| {
             if (ctx.string_dict.?.get(indices[i])) |v| {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                const owned = try takeBytes(ctx.allocator, v);
+                result[i] = .{ .value = owned };
             } else {
-                result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, "") };
+                const owned = try takeBytes(ctx.allocator, "");
+                result[i] = .{ .value = owned };
             }
         }
     } else if (ctx.uses_dict and T == i32) {
@@ -814,7 +886,8 @@ fn decodeRequiredColumn(
         for (0..ctx.num_values) |i| {
             if (data_offset + fixed_len > value_data.len) return error.EndOfData;
             const value = value_data[data_offset..][0..fixed_len];
-            result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, value) };
+            const owned = try value_mod.dupeBytes(ctx.allocator, value);
+            result[i] = .{ .value = owned };
             data_offset += fixed_len;
         }
     } else if (T == f16 and is_fixed_len and fixed_len == 2) {
@@ -831,7 +904,8 @@ fn decodeRequiredColumn(
         const int_size: usize = if (ctx.schema_elem.type_ == .int32) 4 else 8;
         var data_offset: usize = 0;
         for (0..ctx.num_values) |i| {
-            result[i] = .{ .value = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size) };
+            const owned = try decodeDecimalInt(ctx.allocator, value_data, data_offset, int_size);
+            result[i] = .{ .value = owned };
             data_offset += int_size;
         }
     } else {
@@ -841,7 +915,8 @@ fn decodeRequiredColumn(
             if (decoder.next()) |v| {
                 // For byte arrays, we need to dupe since value_data may be freed
                 if (T == []const u8) {
-                    result[i] = .{ .value = try value_mod.dupeBytes(ctx.allocator, v) };
+                    const owned = try takeBytes(ctx.allocator, v);
+                    result[i] = .{ .value = owned };
                 } else {
                     result[i] = .{ .value = v };
                 }
@@ -997,6 +1072,12 @@ pub fn decodeColumnDynamicWithValueEncoding(
     // Only use dictionary decoding if the encoding is actually dictionary-based
     const is_dict_encoded = uses_dict and
         (value_encoding == .rle_dictionary or value_encoding == .plain_dictionary);
+
+    const flat_fast_ok = !is_dict_encoded and value_encoding == .plain and max_rep_level == 0 and
+        (max_def_level == 0 or (max_def_level == 1 and schema_elem.repetition_type == .optional));
+    if (flat_fast_ok) {
+        if (try decodeFlatPlainFixed(allocator, physical_type, value_data, num_values, max_def_level, def_level_encoding, rep_level_encoding)) |r| return r;
+    }
 
     return switch (physical_type) {
         .boolean => decodeDynamicBool(allocator, schema_elem, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding),
@@ -1194,7 +1275,8 @@ fn decodeDeltaEncodedValuesV2(
             for (0..num_values) |i| {
                 if (def_mask[i]) {
                     if (decoded_idx < result.values.len) {
-                        values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, result.values[decoded_idx]) };
+                        const owned = try value_mod.dupeBytes(allocator, result.values[decoded_idx]);
+                        values[i] = .{ .bytes_val = owned };
                         decoded_idx += 1;
                     } else {
                         values[i] = .{ .null_val = {} };
@@ -1212,7 +1294,8 @@ fn decodeDeltaEncodedValuesV2(
             for (0..num_values) |i| {
                 if (def_mask[i]) {
                     if (decoded_idx < result.values.len) {
-                        values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, result.values[decoded_idx]) };
+                        const owned = try value_mod.dupeBytes(allocator, result.values[decoded_idx]);
+                        values[i] = .{ .bytes_val = owned };
                         decoded_idx += 1;
                     } else {
                         values[i] = .{ .null_val = {} };
@@ -1537,9 +1620,11 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 if (string_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    const owned = try takeBytes(allocator, v);
+                    values[i] = .{ .bytes_val = owned };
                 } else {
-                    values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, "") };
+                    const owned = try takeBytes(allocator, "");
+                    values[i] = .{ .bytes_val = owned };
                 }
                 idx_pos += 1;
             } else {
@@ -1551,7 +1636,8 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 const ba = try plain.decodeByteArray(values_data[data_offset..]);
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, ba.value) };
+                const owned = try takeBytes(allocator, ba.value);
+                values[i] = .{ .bytes_val = owned };
                 data_offset += ba.bytes_read;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -1574,7 +1660,8 @@ fn decodeDynamicFixedByteArrayV2(allocator: std.mem.Allocator, schema_elem: form
         for (0..num_values) |i| {
             if (def_mask[i]) {
                 if (fixed_byte_array_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    const owned = try value_mod.dupeBytes(allocator, v);
+                    values[i] = .{ .fixed_bytes_val = owned };
                 } else {
                     values[i] = .{ .null_val = {} };
                 }
@@ -1591,7 +1678,8 @@ fn decodeDynamicFixedByteArrayV2(allocator: std.mem.Allocator, schema_elem: form
             if (def_mask[i]) {
                 if (data_offset + fixed_len > values_data.len) return error.EndOfData;
                 const value = values_data[data_offset..][0..fixed_len];
-                values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, value) };
+                const owned = try value_mod.dupeBytes(allocator, value);
+                values[i] = .{ .fixed_bytes_val = owned };
                 data_offset += fixed_len;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -1633,8 +1721,8 @@ fn decodeLevelsForDynamicWithEncoding(
 
         if (rep_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const rep_bytes = rle.bitPackedSize(num_values, rep_bit_width);
-            if (data_offset + rep_bytes > value_data.len) return error.EndOfData;
+            const rep_bytes = try rle.bitPackedSize(num_values, rep_bit_width);
+            if (rep_bytes > value_data.len - data_offset) return error.EndOfData; // data_offset <= len: every earlier advance was checked
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_bytes);
             data_offset += rep_bytes;
             rep_levels = try rle.decodeBitPackedLevels(allocator, rep_levels_data, rep_bit_width, num_values);
@@ -1643,7 +1731,8 @@ fn decodeLevelsForDynamicWithEncoding(
             if (data_offset + 4 > value_data.len) return error.EndOfData;
             const rep_levels_len = try plain.decodeU32(value_data[data_offset..]);
             data_offset += 4;
-            if (data_offset + rep_levels_len > value_data.len) return error.EndOfData;
+            // data_offset <= len here: the u32 prefix was checked and skipped above.
+            if (rep_levels_len > value_data.len - data_offset) return error.EndOfData;
             const rep_levels_data = try safe.slice(value_data, data_offset, rep_levels_len);
             data_offset += rep_levels_len;
             rep_levels = try rle.decode(allocator, rep_levels_data, rep_bit_width, num_values);
@@ -1661,8 +1750,8 @@ fn decodeLevelsForDynamicWithEncoding(
 
         if (def_level_encoding == .bit_packed) {
             // Pure bit-packed: no length prefix
-            const def_bytes = rle.bitPackedSize(num_values, def_bit_width);
-            if (data_offset + def_bytes > value_data.len) return error.EndOfData;
+            const def_bytes = try rle.bitPackedSize(num_values, def_bit_width);
+            if (def_bytes > value_data.len - data_offset) return error.EndOfData; // data_offset <= len: every earlier advance was checked
             const def_levels_data = try safe.slice(value_data, data_offset, def_bytes);
             data_offset += def_bytes;
             def_levels = try rle.decodeBitPackedLevels(allocator, def_levels_data, def_bit_width, num_values);
@@ -1671,7 +1760,8 @@ fn decodeLevelsForDynamicWithEncoding(
             if (data_offset + 4 > value_data.len) return error.EndOfData;
             const def_levels_len = try plain.decodeU32(value_data[data_offset..]);
             data_offset += 4;
-            if (data_offset + def_levels_len > value_data.len) return error.EndOfData;
+            // data_offset <= len here: the u32 prefix was checked and skipped above.
+            if (def_levels_len > value_data.len - data_offset) return error.EndOfData;
             const def_levels_data = try safe.slice(value_data, data_offset, def_levels_len);
             data_offset += def_levels_len;
             def_levels = try rle.decodeLevels(allocator, def_levels_data, def_bit_width, num_values);
@@ -1703,6 +1793,86 @@ fn decodeLevelsForDynamicWithEncoding(
     };
 }
 
+/// Fast path for flat PLAIN INT32/INT64/FLOAT/DOUBLE pages: decodes straight into
+/// `Value`s with one length check per page. Returns null (caller must use the
+/// general path) when levels fail to decode or the page is short, so malformed
+/// pages keep their existing errors and lenient behavior.
+fn decodeFlatPlainFixed(
+    allocator: std.mem.Allocator,
+    physical_type: format.PhysicalType,
+    value_data: []const u8,
+    num_values: usize,
+    max_def_level: u8,
+    def_level_encoding: format.Encoding,
+    rep_level_encoding: format.Encoding,
+) !?DynamicDecodeResult {
+    const width: usize = switch (physical_type) {
+        .int32, .float => 4,
+        .int64, .double => 8,
+        else => return null,
+    };
+    if (max_def_level == 0) {
+        // REQUIRED: no level bytes and no mask, so the page is just the values.
+        const needed = std.math.mul(usize, num_values, width) catch return null;
+        if (value_data.len < needed) return null;
+        const values = try allocator.alloc(Value, num_values);
+        fillPlainFixed(physical_type, values, value_data, null);
+        return .{ .values = values, .def_levels = null, .rep_levels = null };
+    }
+    const lv = decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, 0, def_level_encoding, rep_level_encoding) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer allocator.free(lv.def_mask);
+
+    const body = value_data[lv.data_offset..]; // data_offset <= len, checked by the level decoder
+    const needed = std.math.mul(usize, lv.non_null_count, width) catch std.math.maxInt(usize);
+    if (body.len < needed) {
+        if (lv.def_levels) |d| allocator.free(d);
+        return null;
+    }
+
+    const values = allocator.alloc(Value, num_values) catch |e| {
+        if (lv.def_levels) |d| allocator.free(d);
+        return e;
+    };
+    fillPlainFixed(physical_type, values, body, lv.def_mask);
+    return .{ .values = values, .def_levels = lv.def_levels, .rep_levels = null };
+}
+
+fn fillPlainFixed(physical_type: format.PhysicalType, out: []Value, body: []const u8, def_mask: ?[]const bool) void {
+    switch (physical_type) {
+        .int32 => fillPlainFixedT(i32, out, body, def_mask),
+        .int64 => fillPlainFixedT(i64, out, body, def_mask),
+        .float => fillPlainFixedT(f32, out, body, def_mask),
+        .double => fillPlainFixedT(f64, out, body, def_mask),
+        else => unreachable, // filtered by the width switch in decodeFlatPlainFixed
+    }
+}
+
+/// `def_mask == null` means every value is present.
+fn fillPlainFixedT(comptime T: type, out: []Value, body: []const u8, def_mask: ?[]const bool) void {
+    const Bits = if (@sizeOf(T) == 4) u32 else u64;
+    var off: usize = 0;
+    for (out, 0..) |*v, i| {
+        const present = if (def_mask) |m| m[i] else true;
+        if (!present) {
+            v.* = .{ .null_val = {} };
+            continue;
+        }
+        // In bounds: caller checked body.len >= non_null_count * @sizeOf(T).
+        const x: T = @bitCast(std.mem.readInt(Bits, body[off..][0..@sizeOf(T)], .little));
+        v.* = switch (T) {
+            i32 => .{ .int32_val = x },
+            i64 => .{ .int64_val = x },
+            f32 => .{ .float_val = x },
+            f64 => .{ .double_val = x },
+            else => @compileError("fillPlainFixedT: unsupported " ++ @typeName(T)),
+        };
+        off += @sizeOf(T);
+    }
+}
+
 fn decodeDynamicBool(
     allocator: std.mem.Allocator,
     schema_elem: format.SchemaElement,
@@ -1727,6 +1897,7 @@ fn decodeDynamicBool(
 
     const typed_result = try decodeColumnWithLevels(bool, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     // Convert to Value
     const values = try allocator.alloc(Value, num_values);
@@ -1756,8 +1927,13 @@ fn decodeDynamicBoolRLE(
 ) !DynamicDecodeResult {
     // Parse definition/repetition levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
 
@@ -1825,6 +2001,7 @@ fn decodeDynamicInt32(
 
     const typed_result = try decodeColumnWithLevels(i32, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -1868,6 +2045,7 @@ fn decodeDynamicInt64(
 
     const typed_result = try decodeColumnWithLevels(i64, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -1915,6 +2093,7 @@ fn decodeDynamicFloat(
 
     const typed_result = try decodeColumnWithLevels(f32, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -1962,6 +2141,7 @@ fn decodeDynamicDouble(
 
     const typed_result = try decodeColumnWithLevels(f64, ctx, value_data);
     defer allocator.free(typed_result.values);
+    errdefer freeLevels(allocator, typed_result.def_levels, typed_result.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     for (typed_result.values, 0..) |opt, i| {
@@ -2106,6 +2286,7 @@ fn decodeDynamicByteArray(
 
     const typed_result = try decodeColumnWithLevels([]const u8, ctx, value_data);
     // Don't defer free - we're transferring ownership of the byte arrays
+    errdefer discardBytesResult(allocator, typed_result);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2151,13 +2332,15 @@ fn decodeDynamicFixedByteArray(
             const rep_bit_width = format.computeBitWidth(max_rep_level);
             if (rep_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
+                const rep_bytes = try rle.bitPackedSize(num_values, rep_bit_width);
+                if (rep_bytes > value_data.len - pos) return error.EndOfData; // pos <= len: checked above
                 rep_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], rep_bit_width, num_values);
-                pos += rle.bitPackedSize(num_values, rep_bit_width);
+                pos += rep_bytes;
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const rep_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
                 pos += 4;
-                if (pos + rep_len > value_data.len) return error.EndOfData;
+                if (rep_len > value_data.len - pos) return error.EndOfData; // pos <= len: checked by the 4-byte prefix test above; subtraction cannot overflow on 32-bit
                 rep_levels = try rle.decodeLevels(allocator, value_data[pos..][0..rep_len], rep_bit_width, num_values);
                 pos += rep_len;
             }
@@ -2172,13 +2355,15 @@ fn decodeDynamicFixedByteArray(
             const def_bit_width = format.computeBitWidth(max_def_level);
             if (def_level_encoding == .bit_packed) {
                 if (pos > value_data.len) return error.EndOfData;
+                const def_bytes = try rle.bitPackedSize(num_values, def_bit_width);
+                if (def_bytes > value_data.len - pos) return error.EndOfData; // pos <= len: checked above
                 def_levels = try rle.decodeBitPackedLevels(allocator, value_data[pos..], def_bit_width, num_values);
-                pos += rle.bitPackedSize(num_values, def_bit_width);
+                pos += def_bytes;
             } else {
                 if (pos + 4 > value_data.len) return error.EndOfData;
                 const def_len = std.mem.readInt(u32, value_data[pos..][0..4], .little);
                 pos += 4;
-                if (pos + def_len > value_data.len) return error.EndOfData;
+                if (def_len > value_data.len - pos) return error.EndOfData; // pos <= len, as above
                 def_levels = try rle.decodeLevels(allocator, value_data[pos..][0..def_len], def_bit_width, num_values);
                 pos += def_len;
             }
@@ -2219,7 +2404,8 @@ fn decodeDynamicFixedByteArray(
             const is_present = if (def_levels) |dl| dl[i] == max_def_level else true;
             if (is_present) {
                 if (fixed_byte_array_dict.?.get(indices[idx_pos])) |v| {
-                    values[i] = .{ .fixed_bytes_val = try value_mod.dupeBytes(allocator, v) };
+                    const owned = try value_mod.dupeBytes(allocator, v);
+                    values[i] = .{ .fixed_bytes_val = owned };
                 } else {
                     values[i] = .{ .null_val = {} };
                 }
@@ -2250,6 +2436,7 @@ fn decodeDynamicFixedByteArray(
     };
 
     const typed_result = try decodeColumnWithLevels([]const u8, ctx, value_data);
+    errdefer discardBytesResult(allocator, typed_result);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2296,8 +2483,13 @@ fn decodeDynamicInt96(
 
     // Decode levels first to get data offset
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
 
@@ -2450,18 +2642,23 @@ fn decodeDeltaBinaryPacked(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     const physical_type = schema_elem.type_ orelse return error.InvalidArgument;
-    
+
     // Decode levels first to get data offset
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     if (physical_type == .int32) {
         const decoded = delta_binary_packed.decodeInt32(allocator, values_data) catch |err| {
             return switch (err) {
@@ -2470,7 +2667,7 @@ fn decodeDeltaBinaryPacked(
             };
         };
         defer allocator.free(decoded);
-        
+
         // Map decoded values to output, respecting nulls
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
@@ -2493,7 +2690,7 @@ fn decodeDeltaBinaryPacked(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2510,7 +2707,7 @@ fn decodeDeltaBinaryPacked(
     } else {
         return error.InvalidArgument;
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2530,18 +2727,23 @@ fn decodeDeltaLengthByteArray(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     _ = schema_elem;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     // Decode using delta length byte array decoder
     var decode_result = delta_length_byte_array.decode(allocator, values_data) catch |err| {
         return switch (err) {
@@ -2550,13 +2752,14 @@ fn decodeDeltaLengthByteArray(
         };
     };
     defer decode_result.deinit();
-    
+
     // Map decoded values to output
     var decoded_idx: usize = 0;
     for (0..num_values) |i| {
         if (levels_info.def_mask[i]) {
             if (decoded_idx < decode_result.values.len) {
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]) };
+                const owned = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]);
+                values[i] = .{ .bytes_val = owned };
                 decoded_idx += 1;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -2565,7 +2768,7 @@ fn decodeDeltaLengthByteArray(
             values[i] = .{ .null_val = {} };
         }
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2585,18 +2788,23 @@ fn decodeDeltaByteArray(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     _ = schema_elem;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     // Decode using delta byte array decoder
     var decode_result = delta_byte_array.decode(allocator, values_data) catch |err| {
         return switch (err) {
@@ -2605,13 +2813,14 @@ fn decodeDeltaByteArray(
         };
     };
     defer decode_result.deinit();
-    
+
     // Map decoded values to output
     var decoded_idx: usize = 0;
     for (0..num_values) |i| {
         if (levels_info.def_mask[i]) {
             if (decoded_idx < decode_result.values.len) {
-                values[i] = .{ .bytes_val = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]) };
+                const owned = try value_mod.dupeBytes(allocator, decode_result.values[decoded_idx]);
+                values[i] = .{ .bytes_val = owned };
                 decoded_idx += 1;
             } else {
                 values[i] = .{ .null_val = {} };
@@ -2620,7 +2829,7 @@ fn decodeDeltaByteArray(
             values[i] = .{ .null_val = {} };
         }
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2640,18 +2849,23 @@ fn decodeByteStreamSplit(
     rep_level_encoding: format.Encoding,
 ) !DynamicDecodeResult {
     const physical_type = schema_elem.type_ orelse return error.InvalidArgument;
-    
+
     // Decode levels first
     const levels_info = try decodeLevelsForDynamicWithEncoding(
-        allocator, value_data, num_values, max_def_level, max_rep_level,
-        def_level_encoding, rep_level_encoding,
+        allocator,
+        value_data,
+        num_values,
+        max_def_level,
+        max_rep_level,
+        def_level_encoding,
+        rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
-    
+
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
-    
+
     if (physical_type == .float) {
         const decoded = byte_stream_split.decodeFloat32Alloc(allocator, values_data, levels_info.non_null_count) catch |err| {
             return switch (err) {
@@ -2660,7 +2874,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2682,7 +2896,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2704,7 +2918,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2726,7 +2940,7 @@ fn decodeByteStreamSplit(
             };
         };
         defer allocator.free(decoded);
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2753,7 +2967,7 @@ fn decodeByteStreamSplit(
             for (decoded) |slice| allocator.free(slice);
             allocator.free(decoded);
         }
-        
+
         var decoded_idx: usize = 0;
         for (0..num_values) |i| {
             if (levels_info.def_mask[i]) {
@@ -2772,7 +2986,7 @@ fn decodeByteStreamSplit(
     } else {
         return error.InvalidArgument;
     }
-    
+
     return .{
         .values = values,
         .def_levels = levels_info.def_levels,
@@ -2780,3 +2994,128 @@ fn decodeByteStreamSplit(
     };
 }
 
+test "flat PLAIN fast path: REQUIRED int64 values" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .required, .name = "x" };
+    var data: [24]u8 = undefined;
+    std.mem.writeInt(i64, data[0..8], 1, .little);
+    std.mem.writeInt(i64, data[8..16], -2, .little);
+    std.mem.writeInt(i64, data[16..24], 3, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 1), r.values[0].int64_val);
+    try std.testing.expectEqual(@as(i64, -2), r.values[1].int64_val);
+    try std.testing.expectEqual(@as(i64, 3), r.values[2].int64_val);
+    try std.testing.expect(r.def_levels == null);
+}
+
+test "flat PLAIN fast path: OPTIONAL double with def levels" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .double, .repetition_type = .optional, .name = "d" };
+    var data: [22]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 2, .little); // RLE level block length
+    data[4] = 0x03; // bit-packed run, 1 group
+    data[5] = 0x05; // levels 1,0,1
+    std.mem.writeInt(u64, data[6..14], @bitCast(@as(f64, 1.5)), .little);
+    std.mem.writeInt(u64, data[14..22], @bitCast(@as(f64, -4.25)), .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 1.5), r.values[0].double_val);
+    try std.testing.expect(r.values[1] == .null_val);
+    try std.testing.expectEqual(@as(f64, -4.25), r.values[2].double_val);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
+}
+
+test "flat PLAIN fast path: short REQUIRED int64 keeps existing behavior" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .required, .name = "x" };
+    var data: [16]u8 = undefined; // 2 values for 3 declared
+    std.mem.writeInt(i64, data[0..8], 10, .little);
+    std.mem.writeInt(i64, data[8..16], 20, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 10), r.values[0].int64_val);
+    try std.testing.expectEqual(@as(i64, 20), r.values[1].int64_val);
+    try std.testing.expect(r.values[2] == .null_val);
+}
+
+test "flat PLAIN fast path: short OPTIONAL int32 returns EndOfData" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .optional, .name = "i" };
+    var data: [10]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 2, .little); // RLE level block length
+    data[4] = 0x03; // bit-packed run, 1 group
+    data[5] = 0x07; // levels 1,1,1 -> 3 non-null values expected
+    std.mem.writeInt(i32, data[6..10], 1, .little); // only one value present
+    try std.testing.expectError(error.EndOfData, decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain));
+}
+
+test "flat PLAIN fast path: REQUIRED int32 values" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .required, .name = "i" };
+    var data: [12]u8 = undefined;
+    std.mem.writeInt(i32, data[0..4], 7, .little);
+    std.mem.writeInt(i32, data[4..8], -8, .little);
+    std.mem.writeInt(i32, data[8..12], 9, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 0, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i32, 7), r.values[0].int32_val);
+    try std.testing.expectEqual(@as(i32, -8), r.values[1].int32_val);
+    try std.testing.expectEqual(@as(i32, 9), r.values[2].int32_val);
+    try std.testing.expect(r.def_levels == null);
+}
+
+test "flat PLAIN fast path: OPTIONAL int64 with bit-packed def levels" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .int64, .repetition_type = .optional, .name = "x" };
+    var data: [17]u8 = undefined;
+    data[0] = 0x05; // bit-packed levels 1,0,1 at 1 bit each, LSB first, no length prefix
+    std.mem.writeInt(i64, data[1..9], 100, .little);
+    std.mem.writeInt(i64, data[9..17], -200, .little);
+    var r = try decodeColumnDynamicWithValueEncoding(allocator, elem, &data, 3, 1, 0, false, null, null, null, null, null, null, null, .bit_packed, .rle, .plain);
+    defer r.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 100), r.values[0].int64_val);
+    try std.testing.expect(r.values[1] == .null_val);
+    try std.testing.expectEqual(@as(i64, -200), r.values[2].int64_val);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 1 }, r.def_levels.?);
+}
+
+test "FLBA dictionary page: bit-packed levels longer than the page return EndOfData" {
+    const allocator = std.testing.allocator;
+    const elem = format.SchemaElement{ .type_ = .fixed_len_byte_array, .type_length = 2, .repetition_type = .optional, .name = "f" };
+    var dict = try dictionary.FixedByteArrayDictionary.fromPlain(allocator, "ab", 1, 2);
+    defer dict.deinit();
+    // 16 values at 1 bit need 2 bytes of bit-packed def levels; the page has 1.
+    const page = [_]u8{0xff};
+    try std.testing.expectError(error.EndOfData, decodeDynamicFixedByteArray(allocator, elem, &page, 16, 1, 0, true, &dict, .bit_packed, .rle));
+    // Same for repetition levels.
+    const rep_elem = format.SchemaElement{ .type_ = .fixed_len_byte_array, .type_length = 2, .repetition_type = .repeated, .name = "f" };
+    try std.testing.expectError(error.EndOfData, decodeDynamicFixedByteArray(allocator, rep_elem, &page, 16, 1, 1, true, &dict, .bit_packed, .bit_packed));
+}
+
+fn decodeOptionalPagesForOom(allocator: std.mem.Allocator) !void {
+    // levels 1,0,1 (RLE block: bit-packed run of 1 group), then values.
+    const levels = [_]u8{ 2, 0, 0, 0, 0x03, 0x05 };
+    const str_elem = format.SchemaElement{ .type_ = .byte_array, .repetition_type = .optional, .name = "s" };
+    const plain_page = levels ++ [_]u8{ 1, 0, 0, 0, 'a', 2, 0, 0, 0, 'b', 'c' };
+    var r1 = try decodeColumnDynamicWithValueEncoding(allocator, str_elem, &plain_page, 3, 1, 0, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    r1.deinit(allocator);
+
+    const dict_page = [_]u8{ 1, 0, 0, 0, 'x', 1, 0, 0, 0, 'y' };
+    var dict = try dictionary.StringDictionary.fromPlain(allocator, &dict_page, 2);
+    defer dict.deinit();
+    const idx_page = levels ++ [_]u8{ 1, 0x03, 0x02 }; // bit width 1, indices 0,1
+    var r2 = try decodeColumnDynamicWithValueEncoding(allocator, str_elem, &idx_page, 3, 1, 0, true, &dict, null, null, null, null, null, null, .rle, .rle, .rle_dictionary);
+    r2.deinit(allocator);
+
+    // Repeated int32 (rep + def levels), general (non fast) path.
+    const int_elem = format.SchemaElement{ .type_ = .int32, .repetition_type = .repeated, .name = "i" };
+    const rep_def = levels ++ levels;
+    const int_page = rep_def ++ [_]u8{ 7, 0, 0, 0, 9, 0, 0, 0 };
+    var r3 = try decodeColumnDynamicWithValueEncoding(allocator, int_elem, &int_page, 3, 1, 1, false, null, null, null, null, null, null, null, .rle, .rle, .plain);
+    r3.deinit(allocator);
+}
+
+test "optional page decode frees everything on OOM" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeOptionalPagesForOom, .{});
+}

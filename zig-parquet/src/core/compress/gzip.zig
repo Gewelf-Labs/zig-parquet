@@ -14,7 +14,6 @@ pub const Error = error{
     InvalidSize,
 };
 
-
 // Gzip constants (RFC 1952)
 const GZIP_MAGIC: u16 = 0x1f8b;
 const GZIP_METHOD: u8 = 8; // deflate
@@ -368,13 +367,13 @@ const HuffmanTree = struct {
     fn genCodes(self: *HuffmanTree) void {
         // RFC 1951 §3.2.2 canonical Huffman code assignment
         // Step 1: count symbols per bit-length
-        var bl_count = [_]u32{0} ** 16;
+        var bl_count = @as([16]u32, @splat(0));
         for (self.len.items) |len| {
             if (len > 0) bl_count[len] += 1;
         }
 
         // Step 2: compute starting code for each bit-length
-        var next_code = [_]u32{0} ** 16;
+        var next_code = @as([16]u32, @splat(0));
         var code: u32 = 0;
         for (1..16) |bits| {
             code = (code + bl_count[bits - 1]) << 1;
@@ -391,7 +390,6 @@ const HuffmanTree = struct {
             }
         }
     }
-
 
     fn bitReverse(val: u32, nbits: u5) u32 {
         var result: u32 = 0;
@@ -434,8 +432,8 @@ const Deflater = struct {
         const d = try allocator.create(Deflater);
         d.* = .{
             .window = undefined,
-            .head = [_]u16{0} ** HASH_SIZE,
-            .prev = [_]u16{0} ** WINDOW_SIZE,
+            .head = @as([HASH_SIZE]u16, @splat(0)),
+            .prev = @as([WINDOW_SIZE]u16, @splat(0)),
         };
         return d;
     }
@@ -866,7 +864,6 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 }
 
 pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: usize) Error![]u8 {
-
     var out: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(allocator, uncompressed_size) catch return error.OutOfMemory;
     errdefer out.deinit();
 
@@ -883,7 +880,14 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
 
         // Decompress one gzip member (header + deflate + footer handled by .gzip mode)
         var gz: std.compress.flate.Decompress = .init(&in, .gzip, &[_]u8{});
+        const start = out.written().len;
         _ = gz.reader.streamRemaining(&out.writer) catch return error.DecompressionError;
+        const member = out.written()[start..];
+        var crc: u32 = 0xffffffff;
+        crc = crc32Update(crc, member);
+        crc ^= 0xffffffff;
+        const meta = gz.container_metadata.gzip;
+        if (meta.crc != crc or meta.count != @as(u32, @truncate(member.len))) return error.DecompressionError;
     }
 
     return out.toOwnedSlice() catch return error.OutOfMemory;
@@ -904,6 +908,20 @@ test "gzip round-trip" {
     defer allocator.free(decompressed);
 
     try std.testing.expectEqualSlices(u8, original, decompressed);
+}
+
+test "gzip rejects corrupted payload" {
+    const allocator = std.testing.allocator;
+    const original = "Hello, World! This is a test of gzip compression.";
+
+    const compressed = try compress(allocator, original);
+    defer allocator.free(compressed);
+
+    // Flip a deflate byte, leaving the 10-byte header and 8-byte trailer.
+    try std.testing.expect(compressed.len > 18);
+    compressed[10] ^= 0x01;
+
+    try std.testing.expectError(error.DecompressionError, decompress(allocator, compressed, original.len));
 }
 
 test "gzip empty data" {
@@ -979,4 +997,3 @@ test "gzip decompress ignores oversized size hint" {
     defer allocator.free(result);
     try std.testing.expectEqualSlices(u8, original, result);
 }
-

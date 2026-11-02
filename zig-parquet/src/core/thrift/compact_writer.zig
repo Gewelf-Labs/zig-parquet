@@ -105,7 +105,7 @@ pub const CompactWriter = struct {
 
         if (delta > 0 and delta <= 15) {
             // Delta fits in high nibble
-        const header: u8 = (@as(u8, safe.castTo(u8, delta) catch unreachable) << 4) | @intFromEnum(field_type); // delta is 1..15 from check above
+            const header: u8 = (@as(u8, safe.castTo(u8, delta) catch unreachable) << 4) | @intFromEnum(field_type); // delta is 1..15 from check above
             try self.writeByte(header);
         } else {
             // Write type nibble with 0 delta, then full field ID

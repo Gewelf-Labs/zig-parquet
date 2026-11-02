@@ -24,8 +24,16 @@ pub const SchemaElement = struct {
 
     const Self = @This();
 
+    /// Free the name and any allocated logical type data. Safe on a partially filled value.
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        if (self.name.len > 0) allocator.free(self.name);
+        if (self.logical_type) |lt| lt.deinit(allocator);
+        self.* = .{};
+    }
+
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var elem = Self{};
+        errdefer elem.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -40,13 +48,21 @@ pub const SchemaElement = struct {
                     const v = try reader.readI32();
                     elem.repetition_type = try RepetitionType.fromInt(v);
                 },
-                4 => elem.name = try allocator.dupe(u8, try reader.readString()), // name
+                4 => { // name
+                    const name = try allocator.dupe(u8, try reader.readString());
+                    if (elem.name.len > 0) allocator.free(elem.name);
+                    elem.name = name;
+                },
                 5 => elem.num_children = try reader.readI32(), // num_children
                 6 => elem.converted_type = try reader.readI32(), // converted_type
                 7 => elem.scale = try reader.readI32(), // scale
                 8 => elem.precision = try reader.readI32(), // precision
                 9 => elem.field_id = try reader.readI32(), // field_id
-                10 => elem.logical_type = try LogicalType.parse(allocator, reader), // logical_type
+                10 => { // logical_type
+                    const lt = try LogicalType.parse(allocator, reader);
+                    if (elem.logical_type) |old| old.deinit(allocator);
+                    elem.logical_type = lt;
+                },
                 else => try reader.skip(field.field_type),
             }
         }

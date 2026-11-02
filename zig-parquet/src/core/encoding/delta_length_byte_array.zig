@@ -27,10 +27,10 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error!DecodeResult
     var lengths_decoder = delta_binary_packed.Decoder(i32).init(data);
     const lengths = try lengths_decoder.decode(allocator);
     errdefer allocator.free(lengths);
-    
+
     const values_start = lengths_decoder.pos;
     const values_data = data[values_start..];
-    
+
     // Validate lengths and calculate total size
     var total_size: usize = 0;
     for (lengths) |len| {
@@ -40,11 +40,11 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error!DecodeResult
         const ulen = safe.castTo(usize, len) catch return error.InvalidLength;
         total_size = std.math.add(usize, total_size, ulen) catch return error.InsufficientData;
     }
-    
+
     if (values_data.len < total_size) {
         return error.InsufficientData;
     }
-    
+
     // Build result - copy each value
     const result = allocator.alloc([]const u8, lengths.len) catch return error.OutOfMemory;
     var initialized: usize = 0;
@@ -52,7 +52,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error!DecodeResult
         for (result[0..initialized]) |slice| allocator.free(slice);
         allocator.free(result);
     }
-    
+
     var offset: usize = 0;
     for (lengths, 0..) |len, i| {
         const length: usize = safe.castTo(usize, len) catch return error.InvalidLength;
@@ -61,9 +61,9 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error!DecodeResult
         initialized += 1;
         offset += length;
     }
-    
+
     allocator.free(lengths);
-    
+
     return .{
         .values = result,
         .allocator = allocator,
@@ -74,7 +74,7 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) Error!DecodeResult
 pub const DecodeResult = struct {
     values: [][]const u8,
     allocator: std.mem.Allocator,
-    
+
     pub fn deinit(self: *DecodeResult) void {
         for (self.values) |slice| self.allocator.free(slice);
         self.allocator.free(self.values);
@@ -87,7 +87,7 @@ pub const DecodeResult = struct {
 
 test "delta length byte array decode" {
     const allocator = std.testing.allocator;
-    
+
     // Three strings: "abc", "defgh", "ij"
     // Lengths: [3, 5, 2]
     // Delta encoded lengths:
@@ -112,7 +112,7 @@ test "delta length byte array decode" {
         // This is complex - let's use a simpler test case
     };
     _ = data;
-    
+
     // Use a simpler test: encode manually with all same lengths (delta=0)
     const simple_data = [_]u8{
         // DELTA_BINARY_PACKED header for lengths [3, 3, 3]
@@ -123,12 +123,14 @@ test "delta length byte array decode" {
         0x00, // min_delta = 0
         0x00, 0x00, 0x00, 0x00, // bit_widths all 0 (all deltas are 0)
         // Raw values: "abcdefghi" (3+3+3 = 9 bytes)
-        'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
+        'a',  'b',  'c',  'd',
+        'e',  'f',  'g',  'h',
+        'i',
     };
-    
+
     var result = try decode(allocator, &simple_data);
     defer result.deinit();
-    
+
     try std.testing.expectEqual(@as(usize, 3), result.values.len);
     try std.testing.expectEqualStrings("abc", result.values[0]);
     try std.testing.expectEqualStrings("def", result.values[1]);
@@ -161,16 +163,16 @@ test "delta length byte array decode with empty strings" {
 
 test "delta length byte array empty" {
     const allocator = std.testing.allocator;
-    
+
     const data = [_]u8{
         0x80, 0x01, // block_size = 128
         0x04, // num_mini_blocks = 4
         0x00, // total_values = 0
         0x00, // first_value = 0
     };
-    
+
     var result = try decode(allocator, &data);
     defer result.deinit();
-    
+
     try std.testing.expectEqual(@as(usize, 0), result.values.len);
 }

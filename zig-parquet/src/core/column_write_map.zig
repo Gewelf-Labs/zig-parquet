@@ -117,9 +117,9 @@ pub fn writeColumnChunkMapKeyMultiPage(
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidFixedLength => return error.InvalidFixedLength,
                 error.IntegerOverflow => return error.IntegerOverflow,
-        error.ValueTooLarge => return error.ValueTooLarge,
-        error.UnsupportedEncoding => return error.UnsupportedEncoding,
-        error.NullInRequiredColumn => return error.NullInRequiredColumn,
+                error.ValueTooLarge => return error.ValueTooLarge,
+                error.UnsupportedEncoding => return error.UnsupportedEncoding,
+                error.NullInRequiredColumn => return error.NullInRequiredColumn,
             }
         else
             page_writer.writeDataPageWithLevels(
@@ -131,13 +131,13 @@ pub fn writeColumnChunkMapKeyMultiPage(
                 max_def_level,
                 max_rep_level,
             ) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidFixedLength => return error.InvalidFixedLength,
-            error.IntegerOverflow => return error.IntegerOverflow,
-            error.ValueTooLarge => return error.ValueTooLarge,
-        error.UnsupportedEncoding => return error.UnsupportedEncoding,
-        error.NullInRequiredColumn => return error.NullInRequiredColumn,
-    };
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidFixedLength => return error.InvalidFixedLength,
+                error.IntegerOverflow => return error.IntegerOverflow,
+                error.ValueTooLarge => return error.ValueTooLarge,
+                error.UnsupportedEncoding => return error.UnsupportedEncoding,
+                error.NullInRequiredColumn => return error.NullInRequiredColumn,
+            };
         defer page_result.deinit(allocator);
 
         var result = writeColumnChunkWithDataMap(
@@ -376,9 +376,9 @@ pub fn writeColumnChunkMapValueMultiPage(
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidFixedLength => return error.InvalidFixedLength,
                 error.IntegerOverflow => return error.IntegerOverflow,
-        error.ValueTooLarge => return error.ValueTooLarge,
-        error.UnsupportedEncoding => return error.UnsupportedEncoding,
-        error.NullInRequiredColumn => return error.NullInRequiredColumn,
+                error.ValueTooLarge => return error.ValueTooLarge,
+                error.UnsupportedEncoding => return error.UnsupportedEncoding,
+                error.NullInRequiredColumn => return error.NullInRequiredColumn,
             }
         else
             page_writer.writeDataPageWithLevels(
@@ -390,13 +390,13 @@ pub fn writeColumnChunkMapValueMultiPage(
                 max_def_level,
                 max_rep_level,
             ) catch |e| switch (e) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidFixedLength => return error.InvalidFixedLength,
-            error.IntegerOverflow => return error.IntegerOverflow,
-            error.ValueTooLarge => return error.ValueTooLarge,
-        error.UnsupportedEncoding => return error.UnsupportedEncoding,
-        error.NullInRequiredColumn => return error.NullInRequiredColumn,
-    };
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidFixedLength => return error.InvalidFixedLength,
+                error.IntegerOverflow => return error.IntegerOverflow,
+                error.ValueTooLarge => return error.ValueTooLarge,
+                error.UnsupportedEncoding => return error.UnsupportedEncoding,
+                error.NullInRequiredColumn => return error.NullInRequiredColumn,
+            };
         defer page_result.deinit(allocator);
 
         var result = writeColumnChunkWithDataMap(

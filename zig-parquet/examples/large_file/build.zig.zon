@@ -1,6 +1,7 @@
 .{
     .name = .parquet_large_file_example,
     .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0x3741bd65fbc396c2,
     .dependencies = .{
         .parquet = .{

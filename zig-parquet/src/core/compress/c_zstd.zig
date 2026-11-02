@@ -4,9 +4,12 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("zstd.h");
-});
+const c = struct {
+    extern fn ZSTD_compressBound(srcSize: usize) usize;
+    extern fn ZSTD_compress(dst: [*]u8, dstCapacity: usize, src: [*]const u8, srcSize: usize, compressionLevel: c_int) usize;
+    extern fn ZSTD_isError(code: usize) c_uint;
+    extern fn ZSTD_decompress(dst: [*]u8, dstCapacity: usize, src: [*]const u8, compressedSize: usize) usize;
+};
 
 pub const Error = error{
     CompressionError,

@@ -178,9 +178,16 @@ pub const ByteArrayStatisticsBuilder = struct {
 
     /// Update statistics with a slice of byte array values.
     pub fn update(self: *Self, values: []const []const u8) !void {
-        for (values) |v| {
-            try self.updateValue(v);
+        if (values.len == 0) return;
+        var lo = values[0];
+        var hi = values[0];
+        for (values[1..]) |v| {
+            if (std.mem.order(u8, v, lo) == .lt) lo = v;
+            if (std.mem.order(u8, v, hi) == .gt) hi = v;
         }
+        // At most two owned copies per call instead of one per new extreme.
+        try self.updateValue(lo);
+        try self.updateValue(hi);
     }
 
     /// Update statistics with a single byte array value.
@@ -222,12 +229,18 @@ pub const ByteArrayStatisticsBuilder = struct {
     /// Update statistics with a slice of Optional byte array values (unified API).
     /// This is the preferred method - accepts the same Optional type that Reader returns.
     pub fn updateOptional(self: *Self, values: []const Optional([]const u8)) !void {
-        for (values) |v| {
-            switch (v) {
-                .value => |val| try self.updateValue(val),
-                .null_value => self.null_count += 1,
-            }
-        }
+        var lo: ?[]const u8 = null;
+        var hi: ?[]const u8 = null;
+        for (values) |v| switch (v) {
+            .null_value => self.null_count += 1,
+            .value => |val| {
+                if (lo == null or std.mem.order(u8, val, lo.?) == .lt) lo = val;
+                if (hi == null or std.mem.order(u8, val, hi.?) == .gt) hi = val;
+            },
+        };
+        // At most two owned copies per call instead of one per new extreme.
+        if (lo) |l| try self.updateValue(l);
+        if (hi) |h| try self.updateValue(h);
     }
 
     /// Add to null count.

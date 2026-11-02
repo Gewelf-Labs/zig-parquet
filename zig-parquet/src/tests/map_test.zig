@@ -435,7 +435,6 @@ test "write and read large map column (multi-page accumulator test)" {
             }
         }
     }
-
 }
 
 // =============================================================================

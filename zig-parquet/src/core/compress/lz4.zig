@@ -5,6 +5,7 @@
 //! Reference: https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md
 
 const std = @import("std");
+const repeat = @import("../../repeat.zig");
 
 pub const Error = error{
     CompressionError,
@@ -41,7 +42,6 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 
 /// Decompress LZ4 raw block format (pure Zig)
 pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: usize) Error![]u8 {
-
     if (uncompressed_size == 0) {
         return allocator.alloc(u8, 0) catch return error.OutOfMemory;
     }
@@ -147,7 +147,7 @@ fn lz4CompressBlock(src: []const u8, dst: []u8) usize {
         return writeLastLiterals(dst, 0, src[0..]);
     }
 
-    var hash_table: [HASH_SIZE]u32 = [_]u32{0} ** HASH_SIZE;
+    var hash_table: [HASH_SIZE]u32 = @as([HASH_SIZE]u32, @splat(0));
     var dp: usize = 0;
     var anchor: usize = 0;
     var ip: usize = 1; // skip first byte
@@ -312,7 +312,7 @@ test "lz4 empty data" {
 
 test "lz4 round-trip repetitive data" {
     const allocator = std.testing.allocator;
-    const original = "abcdefgh" ** 1000;
+    const original = comptime repeat.bytes("abcdefgh", 1000);
 
     const compressed = try compress(allocator, original);
     defer allocator.free(compressed);

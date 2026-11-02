@@ -22,10 +22,20 @@ pub const StringDictionary = struct {
 
     /// Create a dictionary from PLAIN-encoded byte arrays
     pub fn fromPlain(allocator: std.mem.Allocator, data: []const u8, num_values: usize) !Self {
+        return init(allocator, data, num_values, true);
+    }
+
+    /// Like `fromPlain`, but entries are slices of `data` (no copies), so
+    /// `data` must outlive the dictionary and every value taken from it.
+    pub fn fromPlainBorrowed(allocator: std.mem.Allocator, data: []const u8, num_values: usize) !Self {
+        return init(allocator, data, num_values, false);
+    }
+
+    fn init(allocator: std.mem.Allocator, data: []const u8, num_values: usize, copy: bool) !Self {
         var values = try allocator.alloc([]const u8, num_values);
         var initialized: usize = 0;
         errdefer {
-            for (values[0..initialized]) |v| allocator.free(v);
+            if (copy) for (values[0..initialized]) |v| allocator.free(v);
             allocator.free(values);
         }
 
@@ -33,7 +43,7 @@ pub const StringDictionary = struct {
         for (0..num_values) |i| {
             if (pos + 4 > data.len) return error.EndOfData;
             const ba = try plain.decodeByteArray(data[pos..]);
-            values[i] = try allocator.dupe(u8, ba.value);
+            values[i] = if (copy) try allocator.dupe(u8, ba.value) else ba.value;
             initialized += 1;
             pos += ba.bytes_read;
         }
@@ -41,7 +51,7 @@ pub const StringDictionary = struct {
         return .{
             .allocator = allocator,
             .values = values,
-            .owns_memory = true,
+            .owns_memory = copy,
         };
     }
 
@@ -306,6 +316,17 @@ test "StringDictionary basic" {
     try std.testing.expectEqualStrings("hello", dict.get(0).?);
     try std.testing.expectEqualStrings("world", dict.get(1).?);
     try std.testing.expectEqual(@as(?[]const u8, null), dict.get(2));
+}
+
+test "StringDictionary borrowed entries point into the page" {
+    const allocator = std.testing.allocator;
+    const dict_data = [_]u8{ 2, 0, 0, 0, 'h', 'i', 0, 0, 0, 0 };
+    var dict = try StringDictionary.fromPlainBorrowed(allocator, &dict_data, 2);
+    defer dict.deinit();
+    try std.testing.expectEqualStrings("hi", dict.get(0).?);
+    try std.testing.expectEqual(@as(usize, 0), dict.get(1).?.len);
+    try std.testing.expectEqual(@as([*]const u8, dict_data[4..].ptr), dict.get(0).?.ptr);
+    try std.testing.expectError(error.EndOfData, StringDictionary.fromPlainBorrowed(allocator, &dict_data, 3));
 }
 
 test "Int32Dictionary basic" {

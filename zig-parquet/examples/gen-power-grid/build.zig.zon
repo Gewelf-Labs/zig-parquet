@@ -1,6 +1,7 @@
 .{
     .name = .gen_power_grid,
     .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0xf817614aa697f6d7,
     .dependencies = .{
         .parquet = .{

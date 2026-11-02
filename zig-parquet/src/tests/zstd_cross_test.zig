@@ -5,6 +5,7 @@
 //! Edge-case tests always run (Zig-only round-trips) with cross-validation when available.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig");
 const build_options = @import("build_options");
 const c_zstd = @import("../core/compress/c_zstd.zig");
 const zig_zstd = @import("../core/compress/zstd.zig");
@@ -60,7 +61,7 @@ test "cross-impl: C compress, Zig decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Hello, World! This is a cross-implementation zstd test." ** 20;
+    const original = comptime repeat.bytes("Hello, World! This is a cross-implementation zstd test.", 20);
 
     const compressed = try c_zstd.compress(allocator, original);
     defer allocator.free(compressed);
@@ -75,7 +76,7 @@ test "cross-impl: Zig compress, C decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Hello, World! This is a cross-implementation zstd test." ** 20;
+    const original = comptime repeat.bytes("Hello, World! This is a cross-implementation zstd test.", 20);
 
     const compressed = try zig_zstd.compress(allocator, original);
     defer allocator.free(compressed);
@@ -90,7 +91,7 @@ test "cross-impl: bidirectional round-trip (all 4 combinations)" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "ABCDEFGH" ** 200;
+    const original = comptime repeat.bytes("ABCDEFGH", 200);
 
     const c_compressed = try c_zstd.compress(allocator, original);
     defer allocator.free(c_compressed);
@@ -186,7 +187,7 @@ test "cross-impl: C level 1 compress, Zig decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Level 1 is the apples-to-apples comparison with our Zig compressor. " ** 30;
+    const original = comptime repeat.bytes("Level 1 is the apples-to-apples comparison with our Zig compressor. ", 30);
 
     const compressed = try c_zstd.compressWithLevel(allocator, original, 1);
     defer allocator.free(compressed);
@@ -201,7 +202,7 @@ test "cross-impl: C multi-level compress, Zig decompress" {
     if (!both_enabled) return;
     const allocator = std.testing.allocator;
 
-    const original = "Testing across compression levels to validate Zig decompressor handles varying frame complexity. " ** 50;
+    const original = comptime repeat.bytes("Testing across compression levels to validate Zig decompressor handles varying frame complexity. ", 50);
 
     for ([_]c_int{ 1, 3, 6, 9, 15, 19 }) |level| {
         const compressed = try c_zstd.compressWithLevel(allocator, original, level);
@@ -220,9 +221,9 @@ test "cross-impl: Zig compress, C decompress (varied patterns)" {
 
     const patterns = [_][]const u8{
         "short",
-        "a]" ** 500,
-        "abcdefghijklmnop" ** 200,
-        "The quick brown fox jumps over the lazy dog. " ** 100,
+        comptime repeat.bytes("a]", 500),
+        comptime repeat.bytes("abcdefghijklmnop", 200),
+        comptime repeat.bytes("The quick brown fox jumps over the lazy dog. ", 100),
     };
 
     for (patterns) |original| {

@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Performance
+- Streaming row iterator: `DynamicReader.rowIteratorStreaming()` and `rowIteratorStreamingProjected()` return a `StreamingRowIterator` that reuses one row buffer. Contract: the row and its byte slices are valid until the next `next()` or `deinit()`. Memory is bounded by one row group. If loading a row group fails, the next `next()` retries that row group.
+- Zero-copy byte arrays on flat reads: PLAIN and dictionary BYTE_ARRAY values (V1 and V2) are slices of the page buffer instead of per-value copies.
+- Flat PLAIN fast path for INT32, INT64, FLOAT and DOUBLE pages.
+- Word-at-a-time bit unpacking for RLE and bit-packed runs; RLE fill uses memset.
+- Flat row assembly without clones: non-nested reads move decoded values into rows, and `rowIterator()` keeps its value block in an iterator arena.
+- Write: PLAIN data pages built in one buffer with definition levels written in place; dictionary data pages built in one buffer; accumulator bit packing; dictionary size limit checked inside the loop; statistics computed after the dictionary decision.
+- Slicing-by-8 CRC-32 for page checksums on write and on checksum-verified reads.
+
+Benchmark, ReleaseFast, zig-only codecs, 1,000,000 rows, Zig 0.16.0, Ryzen 9 7950X (±10%; see `bench/BASELINE.md`). Speedup over the baseline:
+
+| scenario | write | read (rowIterator) | read_stream vs baseline read |
+|---|---:|---:|---:|
+| int64_plain | 3.8x | 2.5x | 8.5x |
+| f64_plain | 3.5x | 2.4x | 7.7x |
+| int64_nullable | 3.8x | 2.4x | 7.8x |
+| str_dict | 1.4x | 2.8x | 6.2x |
+| str_unique | 4.8x | 2.1x | 4.1x |
+| mixed5 | 2.7x | 1.7x | 3.9x |
+
+Output bytes are unchanged: file sizes match the baseline in every scenario, and golden-byte tests cover the changed write paths.
+
+### Added
+- `Row.values_borrowed` flag (default `false`) for rows whose value block is owned by the producer.
+- `StreamingRowIterator` is exported from the package root.
+- `make bench` target (zig-only, ReleaseFast; `ROWS=<n>` sets the row count).
+- Comparison benchmarks: `make bench-rust` (Rust `parquet` crate) and `make bench-js-browsers` / `make bench-js-workerd` (zig-parquet WASM vs hyparquet and parquet-wasm in Chrome, Firefox and workerd). Results in `bench/COMPARE.md`.
+- `ZIG=<path>` on any Makefile target selects the Zig toolchain.
+
+### Changed
+- Zig 0.16.0 and 0.17.0 are both supported from one tree, and CI tests both.
+- `make fmt` requires a Zig 0.16 toolchain (0.17's `zig fmt` emits 0.17-only builtins).
+- `pqi cat` and `pqi head` use the streaming row iterator.
+- C codec dependencies are lazy: zig-only builds no longer fetch the C codec archives.
+
+### Fixed
+- Bit unpacking overflowed `u5` for bit widths 25-31: the byte count was computed in `u5`. This panicked in Debug builds and gave a wrong byte count in ReleaseFast. Fixed by computing in `usize`.
+- Overflow-checked level and bit-pack sizes: `bitPackedSize` returns `error.Overflow`, and V2 level cursor checks are overflow-safe.
+- Out-of-memory leaks: footer parsers (`ColumnChunk`, `Statistics`, `RowGroup`, `SchemaElement`, `KeyValue`, `FileMetaData`) free partial allocations; nested assembly frees the partial list item and struct field; dynamic decoders free def/rep levels and page results.
+- FIXED_LEN_BYTE_ARRAY dictionary pages with BIT_PACKED levels longer than the page panicked; they now return `error.EndOfData`.
+- Repeated footer lists (schema, row groups, key/value metadata) leaked the earlier value; they are now freed before replacement.
+- `DynamicWriter` (and any `SchemaNode`-built schema) wrote `num_children = <struct field count>` on the repeated `list` group of a `list<struct>` column. Files with such a column followed by other columns failed to read back with `error.InvalidSchema`. The group now has one child, the `element` group.
+- GEOMETRY / GEOGRAPHY logical types leaked the `crs` string when parsing failed after it was read, or when the field repeated. `LogicalType.deinit` frees it.
+- Byte-array decoders initialized `Optional` slots in place from a fallible copy: on an allocation failure the slot already carried the `.value` tag with an undefined payload, and the cleanup path freed garbage (crashed on Linux). The copy is now made before the slot is written.
+
 ## [0.2.0] - 2026-04-07
 
 ### Changed

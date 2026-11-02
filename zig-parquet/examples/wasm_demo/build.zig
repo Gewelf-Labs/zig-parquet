@@ -8,12 +8,14 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const codecs = b.option([]const u8, "codecs", "Compression codecs (default: all). See zig-parquet for values.") orelse "all";
 
     const parquet_dep = b.dependency("parquet", .{
         .target = target,
         .optimize = optimize,
+        .codecs = codecs,
     });
-    
+
     // We add an executable instead of just a module, since WASM demo compiles to a wasm binary.
     const exe = b.addExecutable(.{
         .name = "wasm-demo",
@@ -23,7 +25,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     exe.root_module.addImport("parquet", parquet_dep.module("parquet"));
 
     const install_wasm = b.addInstallArtifact(exe, .{});

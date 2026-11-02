@@ -1,0 +1,13 @@
+[package]
+name = "zp-rust-bench"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[dependencies]
+arrow-array = "60.1.0"
+arrow-schema = "60.1.0"
+parquet = { version = "60.1.0", features = ["arrow"] }

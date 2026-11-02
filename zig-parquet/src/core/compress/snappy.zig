@@ -4,6 +4,7 @@
 //! of the Snappy block format. No C/C++ dependencies.
 
 const std = @import("std");
+const repeat = @import("../../repeat.zig");
 const safe = @import("../safe.zig");
 
 pub const Error = error{
@@ -114,7 +115,7 @@ fn compressBlock(src: []const u8, dst: []u8, hash_table: []u16) usize {
 
         if (candidate < ip and
             std.mem.readInt(u32, src[candidate..][0..4], .little) ==
-            std.mem.readInt(u32, src[ip..][0..4], .little))
+                std.mem.readInt(u32, src[ip..][0..4], .little))
         {
             if (ip > anchor) {
                 pos += emitLiteral(dst, pos, src[anchor..ip]);
@@ -351,7 +352,7 @@ test "snappy compress empty data" {
 
 test "snappy round-trip repetitive data" {
     const allocator = std.testing.allocator;
-    const original = "abcdefgh" ** 1000;
+    const original = comptime repeat.bytes("abcdefgh", 1000);
 
     const compressed = try compress(allocator, original);
     defer allocator.free(compressed);

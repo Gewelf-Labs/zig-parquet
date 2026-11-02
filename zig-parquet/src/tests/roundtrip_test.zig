@@ -477,7 +477,7 @@ test "round-trip validates compression actually works" {
     const file_path = "roundtrip_compression_check.parquet";
 
     // Write a large column with compressible data (all same value)
-    const values = [_]i64{42} ** 1000;
+    const values = @as([1000]i64, @splat(42));
 
     // Write uncompressed
     {
@@ -2598,9 +2598,9 @@ test "round-trip statistics fixed byte array logical types" {
     const f16_bytes_three: [2]u8 = @bitCast(f16_three);
     const f16_values = [_][]const u8{ &f16_bytes_one, &f16_bytes_half, &f16_bytes_three };
 
-    const dec_small = [_]u8{0} ** 15 ++ [_]u8{1};
-    const dec_medium = [_]u8{0} ** 15 ++ [_]u8{100};
-    const dec_large = [_]u8{0} ** 14 ++ [_]u8{ 1, 0 };
+    const dec_small = @as([15]u8, @splat(0)) ++ [_]u8{1};
+    const dec_medium = @as([15]u8, @splat(0)) ++ [_]u8{100};
+    const dec_large = @as([14]u8, @splat(0)) ++ [_]u8{ 1, 0 };
     const dec_values = [_][]const u8{ &dec_medium, &dec_small, &dec_large };
     const dec_expected_min = dec_small;
     const dec_expected_max = dec_large;
@@ -4191,6 +4191,224 @@ test "rowIteratorProjected only returns projected columns" {
     try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
 }
 
+/// struct{name: string, qty: int32} "item" (2 leaves), then flat int64 "id"
+/// and string "s", 3 rows. The flat columns' leaf indices (2, 3) differ from
+/// their top-level indices (1, 2).
+fn writeNestedThenFlat(allocator: std.mem.Allocator) ![]u8 {
+    var rw = try parquet.createBufferDynamic(allocator);
+    defer rw.deinit();
+
+    const fields = try rw.allocSchemaFields(2);
+    fields[0] = .{ .name = "name", .node = try rw.allocSchemaNode(.{ .byte_array = .{ .logical = .string } }) };
+    fields[1] = .{ .name = "qty", .node = try rw.allocSchemaNode(.{ .int32 = .{} }) };
+    try rw.addColumnNested("item", try rw.allocSchemaNode(.{ .struct_ = .{ .fields = fields } }), .{});
+    try rw.addColumn("id", TypeInfo.int64, .{});
+    try rw.addColumn("s", TypeInfo.string, .{});
+    try rw.begin();
+
+    for (nested_then_flat_names, 0..) |name, i| {
+        try rw.beginStruct(0);
+        try rw.setStructFieldBytes(0, 0, name);
+        try rw.setStructField(0, 1, .{ .int32_val = @as(i32, @intCast(i)) });
+        try rw.endStruct(0);
+        try rw.setInt64(1, @as(i64, @intCast(i)) * 100);
+        try rw.setBytes(2, name);
+        try rw.addRow();
+    }
+
+    try rw.close();
+    return rw.toOwnedSlice();
+}
+
+const nested_then_flat_names = [_][]const u8{ "apple", "banana", "cherry" };
+
+test "readRowsProjected flat columns after a nested column use leaf indices" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    const rows = try reader.readRowsProjected(0, &.{ 2, 1 });
+    defer deferFreeRows(allocator, rows);
+
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows, 0..) |row, i| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqualStrings(nested_then_flat_names[i], row.getColumn(0).?.asBytes().?);
+        try std.testing.expectEqual(@as(i64, @intCast(i)) * 100, row.getColumn(1).?.asInt64().?);
+    }
+}
+
+/// int64 "i" and string "s" with values `i` and "s{i}", 25 rows in row groups
+/// of 10, 10 and 5.
+fn writeInt64StringGroups(allocator: std.mem.Allocator) ![]u8 {
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+
+    try writer.addColumn("i", TypeInfo.int64, .{});
+    try writer.addColumn("s", TypeInfo.string, .{});
+    writer.setRowGroupSize(10);
+    try writer.begin();
+
+    var buf: [8]u8 = undefined;
+    for (0..25) |i| {
+        try writer.setInt64(0, @as(i64, @intCast(i)));
+        try writer.setBytes(1, try std.fmt.bufPrint(&buf, "s{d}", .{i}));
+        try writer.addRow();
+    }
+    try writer.close();
+    return writer.toOwnedSlice();
+}
+
+test "rowIteratorStreaming flat columns across row groups" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reader.getNumRowGroups());
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var expect_buf: [8]u8 = undefined;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqual(@as(i64, @intCast(count)), row.getColumn(0).?.asInt64().?);
+        const expected = try std.fmt.bufPrint(&expect_buf, "s{d}", .{count});
+        try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+    // Exhausted iterators stay exhausted.
+    try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
+}
+
+test "rowIterator arena resets across row group boundaries" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    // 3 row groups: the iterator arena backing the row values resets twice.
+    var iter = reader.rowIterator();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var expect_buf: [8]u8 = undefined;
+    while (try iter.next()) |row| {
+        try std.testing.expect(row.values_borrowed);
+        try std.testing.expectEqual(@as(i64, @intCast(count)), row.getColumn(0).?.asInt64().?);
+        const expected = try std.fmt.bufPrint(&expect_buf, "s{d}", .{count});
+        try std.testing.expectEqualStrings(expected, row.getColumn(1).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
+test "rowIteratorStreaming row is overwritten by the next call" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    const first = (try iter.next()).?;
+    try std.testing.expectEqual(@as(i64, 0), first.getColumn(0).?.asInt64().?);
+    const second = (try iter.next()).?;
+    // Same row object; its values now hold row 1.
+    try std.testing.expectEqual(first, second);
+    try std.testing.expectEqual(@as(i64, 1), first.getColumn(0).?.asInt64().?);
+    try std.testing.expectEqualStrings("s1", first.getColumn(1).?.asBytes().?);
+}
+
+test "rowIteratorStreamingProjected flat columns after a nested column" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreamingProjected(&.{ 2, 1 });
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 2), row.columnCount());
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], row.getColumn(0).?.asBytes().?);
+        try std.testing.expectEqual(@as(i64, @intCast(count)) * 100, row.getColumn(1).?.asInt64().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "rowIteratorStreaming nested schema falls back to row group assembly" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeNestedThenFlat(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |row| {
+        try std.testing.expectEqual(@as(usize, 3), row.columnCount());
+        const item = row.getColumn(0).?.asStruct().?;
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], item[0].value.asBytes().?);
+        try std.testing.expectEqual(@as(i32, @intCast(count)), item[1].value.asInt32().?);
+        try std.testing.expectEqual(@as(i64, @intCast(count)) * 100, row.getColumn(1).?.asInt64().?);
+        try std.testing.expectEqualStrings(nested_then_flat_names[count], row.getColumn(2).?.asBytes().?);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "rowIteratorStreaming on empty file returns null immediately" {
+    const allocator = std.testing.allocator;
+
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+    try writer.addColumn("x", parquet.TypeInfo.int32, .{});
+    try writer.begin();
+    try writer.close();
+    const buffer = try writer.toOwnedSlice();
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreaming();
+    defer iter.deinit();
+    try std.testing.expectEqual(@as(?*const DynRow, null), try iter.next());
+}
+
+test "rowIteratorStreamingProjected rejects an out-of-range column" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeInt64StringGroups(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var iter = reader.rowIteratorStreamingProjected(&.{5});
+    defer iter.deinit();
+    try std.testing.expectError(error.InvalidArgument, iter.next());
+}
+
 test "rowIterator on empty file returns null immediately" {
     const allocator = std.testing.allocator;
 
@@ -4328,4 +4546,296 @@ test "round-trip all-null optional UUID column with dictionary encoding (Dynamic
     try std.testing.expect(rows[0].getColumn(0).?.isNull());
     try std.testing.expect(rows[1].getColumn(0).?.isNull());
     try std.testing.expect(rows[2].getColumn(0).?.isNull());
+}
+
+// Zero-copy BYTE_ARRAY reads: string values point into page buffers held by the
+// reader's (or streaming iterator's) bytes arena. These tests pin the lifetimes.
+
+/// Row `i` of the zero-copy fixtures: null every 7th row, else a string that
+/// repeats every 4 rows (dictionary) or is unique.
+fn zcExpected(buf: *[32]u8, i: usize, repeat: bool) ?[]const u8 {
+    if (i % 7 == 3) return null;
+    return if (repeat)
+        std.fmt.bufPrint(buf, "repeated-value-{d}", .{i % 4}) catch unreachable // fits in 32 bytes
+    else
+        std.fmt.bufPrint(buf, "unique-value-{d}", .{i}) catch unreachable; // fits in 32 bytes
+}
+
+/// 25 rows of one optional string column in 3 row groups.
+fn writeZcStrings(allocator: std.mem.Allocator, use_dict: bool, codec: parquet.format.CompressionCodec) ![]u8 {
+    var writer = try parquet.createBufferDynamic(allocator);
+    defer writer.deinit();
+
+    try writer.addColumn("s", TypeInfo.string, .{});
+    writer.setUseDictionary(use_dict);
+    writer.setCompression(codec);
+    writer.setRowGroupSize(10);
+    try writer.begin();
+
+    var buf: [32]u8 = undefined;
+    for (0..25) |i| {
+        if (zcExpected(&buf, i, use_dict)) |s| try writer.setBytes(0, s) else try writer.setNull(0);
+        try writer.addRow();
+    }
+    try writer.close();
+    return writer.toOwnedSlice();
+}
+
+fn expectZcEncoding(reader: *parquet.DynamicReader, use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    try std.testing.expectEqual(@as(usize, 3), reader.getNumRowGroups());
+    const meta = reader.metadata.row_groups[0].columns[0].meta_data.?;
+    try std.testing.expectEqual(codec, meta.codec);
+    const has_dict = std.mem.indexOfScalar(parquet.format.Encoding, meta.encodings, .rle_dictionary) != null;
+    try std.testing.expectEqual(use_dict, has_dict);
+}
+
+/// Streaming read; each row is checked when `next()` returns it (the contract).
+fn checkZcStreaming(use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, use_dict, codec);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try expectZcEncoding(&reader, use_dict, codec);
+
+    var iter: parquet.StreamingRowIterator = reader.rowIteratorStreaming();
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var buf: [32]u8 = undefined;
+    // Pointer of row 0's dictionary value; rows 4 and 8 (same row group, same
+    // dictionary entry) must share it when values borrow the dictionary page.
+    var first_ptr: ?[*]const u8 = null;
+    while (try iter.next()) |row| {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, count, use_dict)) |s| {
+            try std.testing.expectEqualStrings(s, v.asBytes().?);
+            if (use_dict and count == 0) first_ptr = v.asBytes().?.ptr;
+            if (use_dict and (count == 4 or count == 8)) try std.testing.expectEqual(first_ptr.?, v.asBytes().?.ptr);
+        } else {
+            try std.testing.expect(v.isNull());
+        }
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
+/// readAllRows of every row group, checked only after all of them were read:
+/// bytes must survive the reader moving on to later row groups.
+fn checkZcReadAll(use_dict: bool, codec: parquet.format.CompressionCodec) !void {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, use_dict, codec);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try expectZcEncoding(&reader, use_dict, codec);
+
+    var groups: [3][]DynRow = undefined;
+    for (&groups, 0..) |*g, rg| g.* = try reader.readAllRows(rg);
+    defer for (groups) |g| {
+        for (g) |row| row.deinit();
+        allocator.free(g);
+    };
+
+    var i: usize = 0;
+    var buf: [32]u8 = undefined;
+    for (groups) |g| for (g) |row| {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, i, use_dict)) |s| {
+            try std.testing.expectEqualStrings(s, v.asBytes().?);
+        } else {
+            try std.testing.expect(v.isNull());
+        }
+        i += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 25), i);
+}
+
+test "zero-copy strings: streaming PLAIN across row groups" {
+    try checkZcStreaming(false, .uncompressed);
+}
+
+test "zero-copy strings: streaming dictionary across row groups" {
+    try checkZcStreaming(true, .uncompressed);
+}
+
+test "zero-copy strings: streaming compressed pages" {
+    if (!build_options.supports_zstd) return;
+    try checkZcStreaming(false, .zstd);
+    try checkZcStreaming(true, .zstd);
+}
+
+test "zero-copy strings: readAllRows bytes survive later row groups" {
+    try checkZcReadAll(false, .uncompressed);
+    try checkZcReadAll(true, .uncompressed);
+    if (!build_options.supports_zstd) return;
+    try checkZcReadAll(false, .zstd);
+    try checkZcReadAll(true, .zstd);
+}
+
+const v2_raw_strings = [_][]const u8{
+    "first value, long enough to notice reuse",
+    "second value, long enough to notice reuse",
+    "third value, long enough to notice reuse",
+    "fourth value, long enough to notice reuse",
+    "fifth value, long enough to notice reuse",
+};
+
+/// One optional string column whose chunk metadata says SNAPPY but whose only
+/// page is a DataPageV2 with is_compressed = false, so values are decoded
+/// straight from the chunk buffer. The schema and footer come from a normal
+/// file; only the column chunk is replaced.
+fn writeV2RawPageInSnappyChunk(allocator: std.mem.Allocator) ![]u8 {
+    var w = try parquet.createBufferDynamic(allocator);
+    defer w.deinit();
+    try w.addColumn("s", TypeInfo.string, .{});
+    try w.begin();
+    for (v2_raw_strings) |s| {
+        try w.setBytes(0, s);
+        try w.addRow();
+    }
+    try w.close();
+    const base = try w.toOwnedSlice();
+    defer allocator.free(base);
+    var reader = try parquet.openBufferDynamic(allocator, base, .{});
+    defer reader.deinit();
+
+    const n: i32 = v2_raw_strings.len;
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    // Definition levels: one RLE run of n ones (bit width 1), no length prefix in V2.
+    try body.writer.writeAll(&.{ @as(u8, v2_raw_strings.len << 1), 1 });
+    for (v2_raw_strings) |s| {
+        try body.writer.writeInt(u32, @intCast(s.len), .little);
+        try body.writer.writeAll(s);
+    }
+    const page_body = body.written();
+    const body_len: i32 = @intCast(page_body.len);
+
+    const thrift = parquet.internals.thrift;
+    var hdr = thrift.CompactWriter.init(allocator);
+    defer hdr.deinit();
+    try hdr.writeFieldHeader(1, .i32);
+    try hdr.writeI32(@intFromEnum(parquet.format.PageType.data_page_v2));
+    try hdr.writeFieldHeader(2, .i32);
+    try hdr.writeI32(body_len);
+    try hdr.writeFieldHeader(3, .i32);
+    try hdr.writeI32(body_len);
+    try hdr.writeFieldHeader(8, .struct_);
+    const saved = hdr.saveFieldId();
+    hdr.resetFieldTracking();
+    try hdr.writeFieldHeader(1, .i32);
+    try hdr.writeI32(n); // num_values
+    try hdr.writeFieldHeader(2, .i32);
+    try hdr.writeI32(0); // num_nulls
+    try hdr.writeFieldHeader(3, .i32);
+    try hdr.writeI32(n); // num_rows
+    try hdr.writeFieldHeader(4, .i32);
+    try hdr.writeI32(@intFromEnum(parquet.format.Encoding.plain));
+    try hdr.writeFieldHeader(5, .i32);
+    try hdr.writeI32(2); // definition_levels_byte_length
+    try hdr.writeFieldHeader(6, .i32);
+    try hdr.writeI32(0); // repetition_levels_byte_length
+    try hdr.writeBoolField(7, false); // is_compressed
+    try hdr.writeStructEnd();
+    hdr.restoreFieldId(saved);
+    try hdr.writeStructEnd();
+
+    const chunk_len: i64 = @intCast(hdr.getWritten().len + page_body.len);
+    const col = &reader.metadata.row_groups[0].columns[0];
+    col.file_offset = 4;
+    col.offset_index_offset = null;
+    col.offset_index_length = null;
+    col.column_index_offset = null;
+    col.column_index_length = null;
+    const meta = &col.meta_data.?;
+    meta.codec = .snappy;
+    meta.data_page_offset = 4;
+    meta.dictionary_page_offset = null;
+    meta.total_compressed_size = chunk_len;
+    meta.total_uncompressed_size = chunk_len;
+
+    var footer = thrift.CompactWriter.init(allocator);
+    defer footer.deinit();
+    try reader.metadata.serialize(&footer);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.writeAll("PAR1");
+    try out.writer.writeAll(hdr.getWritten());
+    try out.writer.writeAll(page_body);
+    try out.writer.writeAll(footer.getWritten());
+    try out.writer.writeInt(u32, @intCast(footer.getWritten().len), .little);
+    try out.writer.writeAll("PAR1");
+    return out.toOwnedSlice();
+}
+
+test "zero-copy strings: V2 uncompressed page in a compressed chunk" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeV2RawPageInSnappyChunk(allocator);
+    defer allocator.free(buffer);
+
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+    try std.testing.expectEqual(parquet.format.CompressionCodec.snappy, reader.metadata.row_groups[0].columns[0].meta_data.?.codec);
+
+    // readAllRows: checked after the read returns (the chunk buffer is gone).
+    const rows = try reader.readAllRows(0);
+    defer {
+        for (rows) |row| row.deinit();
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(v2_raw_strings.len, rows.len);
+    for (rows, v2_raw_strings) |row, s| try std.testing.expectEqualStrings(s, row.getColumn(0).?.asBytes().?);
+
+    var it = reader.rowIterator();
+    defer it.deinit();
+    var i: usize = 0;
+    while (try it.next()) |row| : (i += 1) try std.testing.expectEqualStrings(v2_raw_strings[i], row.getColumn(0).?.asBytes().?);
+    try std.testing.expectEqual(v2_raw_strings.len, i);
+
+    var sit = reader.rowIteratorStreaming();
+    defer sit.deinit();
+    i = 0;
+    while (try sit.next()) |row| : (i += 1) try std.testing.expectEqualStrings(v2_raw_strings[i], row.getColumn(0).?.asBytes().?);
+    try std.testing.expectEqual(v2_raw_strings.len, i);
+}
+
+test "RowIterator frees its arena when exhausted without deinit" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, false, .uncompressed);
+    defer allocator.free(buffer);
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var it = reader.rowIterator();
+    // No deinit: once next() returns null nothing may be left allocated.
+    var count: usize = 0;
+    while (try it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 25), count);
+}
+
+test "StreamingRowIterator retries a row group whose load failed" {
+    const allocator = std.testing.allocator;
+    const buffer = try writeZcStrings(allocator, false, .uncompressed);
+    defer allocator.free(buffer);
+    var reader = try parquet.openBufferDynamic(allocator, buffer, .{});
+    defer reader.deinit();
+
+    var it = reader.rowIteratorStreaming();
+    defer it.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    reader.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, it.next());
+    reader.allocator = allocator;
+
+    var count: usize = 0;
+    var buf: [32]u8 = undefined;
+    while (try it.next()) |row| : (count += 1) {
+        const v = row.getColumn(0).?;
+        if (zcExpected(&buf, count, false)) |s| try std.testing.expectEqualStrings(s, v.asBytes().?) else try std.testing.expect(v.isNull());
+    }
+    try std.testing.expectEqual(@as(usize, 25), count);
 }

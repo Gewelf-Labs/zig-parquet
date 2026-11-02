@@ -18,9 +18,8 @@ const build_options = @import("build_options");
 const version = build_options.version;
 
 pub fn main(init: std.process.Init) !void {
-    // init.gpa is DebugAllocator in Debug mode. Its per-allocation stack
-    // trace capture uses DWARF unwinding as of Zig 0.16 (previously
-    // frame-pointer walking), which is ~1000× slower per frame. On files
+    // init.gpa is SafeAllocator in Debug mode. Its per-allocation stack
+    // trace capture uses DWARF unwinding, which is ~1000× slower per frame. On files
     // with hot allocation paths (e.g. ~440k dupes in the FLBA column
     // decoder for covid.snappy.parquet), Debug-mode pqi appears to hang.
     // pqi is a short-lived CLI; process-exit cleanup makes leak tracking

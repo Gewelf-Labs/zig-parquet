@@ -8,6 +8,7 @@ const std = @import("std");
 const parquet = @import("../lib.zig");
 const column_decoder = @import("../core/column_decoder.zig");
 const format = @import("../core/format.zig");
+const thrift = @import("../core/thrift/mod.zig");
 
 const TypeInfo = parquet.TypeInfo;
 const ColumnProperties = parquet.DynamicWriter.ColumnProperties;
@@ -40,7 +41,13 @@ fn expectDecoderUnsupportedEncoding(
         0, // max_def_level
         0, // max_rep_level
         false, // uses_dict
-        null, null, null, null, null, null, null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
         .rle, // def_level_encoding (irrelevant for max_def=0)
         .rle, // rep_level_encoding
         value_encoding,
@@ -300,7 +307,7 @@ test "DynamicWriter: close with no columns returns InvalidState" {
 test "V2 decoder: delta_binary_packed on BYTE_ARRAY returns UnsupportedEncoding" {
     const allocator = std.testing.allocator;
     const schema_elem = makeSchemaElem(.byte_array);
-    const dummy_data = &[_]u8{0} ** 8;
+    const dummy_data = &@as([8]u8, @splat(0));
 
     const result = column_decoder.decodeColumnDynamicV2(
         allocator,
@@ -309,9 +316,16 @@ test "V2 decoder: delta_binary_packed on BYTE_ARRAY returns UnsupportedEncoding"
         &.{}, // def_levels_data
         dummy_data,
         0,
-        0, 0,
+        0,
+        0,
         false,
-        null, null, null, null, null, null, null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
         .delta_binary_packed,
     );
 
@@ -321,7 +335,7 @@ test "V2 decoder: delta_binary_packed on BYTE_ARRAY returns UnsupportedEncoding"
 test "V2 decoder: byte_stream_split on BOOLEAN returns UnsupportedEncoding" {
     const allocator = std.testing.allocator;
     const schema_elem = makeSchemaElem(.boolean);
-    const dummy_data = &[_]u8{0} ** 8;
+    const dummy_data = &@as([8]u8, @splat(0));
 
     const result = column_decoder.decodeColumnDynamicV2(
         allocator,
@@ -330,9 +344,16 @@ test "V2 decoder: byte_stream_split on BOOLEAN returns UnsupportedEncoding" {
         &.{},
         dummy_data,
         0,
-        0, 0,
+        0,
+        0,
         false,
-        null, null, null, null, null, null, null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
         .byte_stream_split,
     );
 
@@ -342,7 +363,7 @@ test "V2 decoder: byte_stream_split on BOOLEAN returns UnsupportedEncoding" {
 test "V2 decoder: RLE on INT32 returns UnsupportedEncoding" {
     const allocator = std.testing.allocator;
     const schema_elem = makeSchemaElem(.int32);
-    const dummy_data = &[_]u8{0} ** 8;
+    const dummy_data = &@as([8]u8, @splat(0));
 
     const result = column_decoder.decodeColumnDynamicV2(
         allocator,
@@ -351,9 +372,16 @@ test "V2 decoder: RLE on INT32 returns UnsupportedEncoding" {
         &.{},
         dummy_data,
         0,
-        0, 0,
+        0,
+        0,
         false,
-        null, null, null, null, null, null, null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
         .rle,
     );
 
@@ -363,7 +391,7 @@ test "V2 decoder: RLE on INT32 returns UnsupportedEncoding" {
 test "V2 decoder: unknown encoding (bit_packed) returns UnsupportedEncoding" {
     const allocator = std.testing.allocator;
     const schema_elem = makeSchemaElem(.int32);
-    const dummy_data = &[_]u8{0} ** 8;
+    const dummy_data = &@as([8]u8, @splat(0));
 
     const result = column_decoder.decodeColumnDynamicV2(
         allocator,
@@ -372,9 +400,16 @@ test "V2 decoder: unknown encoding (bit_packed) returns UnsupportedEncoding" {
         &.{},
         dummy_data,
         0,
-        0, 0,
+        0,
+        0,
         false,
-        null, null, null, null, null, null, null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
         .bit_packed,
     );
 
@@ -401,7 +436,7 @@ test "reader: too-short file (no magic) returns error" {
 
 test "reader: wrong magic bytes returns error" {
     const allocator = std.testing.allocator;
-    var bad_magic = [_]u8{0} ** 64;
+    var bad_magic = @as([64]u8, @splat(0));
     bad_magic[0] = 'X';
     bad_magic[1] = 'X';
     bad_magic[2] = 'X';
@@ -424,4 +459,18 @@ test "reader: truncated footer returns error" {
     std.mem.writeInt(i32, buf[4..8], 100, .little);
     const result = parquet.openBufferDynamic(allocator, &buf, .{});
     try std.testing.expect(std.meta.isError(result));
+}
+
+test "footer: schema list larger than remaining bytes returns ListTooLong" {
+    const allocator = std.testing.allocator;
+    const footer = [_]u8{
+        0x15, 0x02, // field 1: version = 1
+        0x19, // field 2: list
+        0xFC, // list<struct>, size follows as varint
+        0xFF, 0xFF, 0xFF, 0xFF, 0x0F, // size = 2^32 - 1
+        0,    0,    0,    0,
+    };
+    var reader = thrift.CompactReader.init(&footer);
+    const result = format.FileMetaData.parse(allocator, &reader);
+    try std.testing.expectError(error.ListTooLong, result);
 }

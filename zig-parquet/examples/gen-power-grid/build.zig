@@ -3,10 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const codecs = b.option([]const u8, "codecs", "Compression codecs (default: all). See zig-parquet for values.") orelse "all";
 
     const parquet_dep = b.dependency("parquet", .{
         .target = target,
         .optimize = optimize,
+        .codecs = codecs,
     });
 
     // Generator executable
@@ -45,9 +47,16 @@ pub fn build(b: *std.Build) void {
 
     const run_read = b.addRunArtifact(read_exe);
     run_read.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_read.addArgs(args);
-    }
+    passArgs(b, run_read);
     const run_read_step = b.step("read", "Read random segment from grid data file");
     run_read_step.dependOn(&run_read.step);
+}
+
+/// Forward `zig build <step> -- args...` on Zig 0.16 (`b.args`) and 0.17 (`addPassthruArgs`).
+fn passArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
+    }
 }

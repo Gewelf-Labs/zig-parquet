@@ -29,6 +29,7 @@ test {
     _ = @import("callback_transport_test.zig");
     _ = @import("c_abi_test.zig");
     _ = @import("negative_test.zig");
+    _ = @import("footer_parse_test.zig");
     _ = @import("zstd_cross_test.zig");
     _ = @import("snappy_cross_test.zig");
     _ = @import("gzip_cross_test.zig");

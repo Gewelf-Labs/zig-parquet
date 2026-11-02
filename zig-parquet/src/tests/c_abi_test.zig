@@ -1392,7 +1392,10 @@ test "Test E: RowWriterHandle list<int32> roundtrip via Zig" {
 
     const raw = switch (handle.backend) {
         .buffer => |bt| bt.written(),
-        else => { handle.deinit(); return error.TestFailed; },
+        else => {
+            handle.deinit();
+            return error.TestFailed;
+        },
     };
     const written = try allocator.dupe(u8, raw);
     defer allocator.free(written);
@@ -1456,7 +1459,10 @@ test "Test F: RowWriterHandle struct roundtrip via Zig" {
 
     const raw = switch (handle.backend) {
         .buffer => |bt| bt.written(),
-        else => { handle.deinit(); return error.TestFailed; },
+        else => {
+            handle.deinit();
+            return error.TestFailed;
+        },
     };
     const written = try allocator.dupe(u8, raw);
     defer allocator.free(written);

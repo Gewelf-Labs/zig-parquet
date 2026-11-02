@@ -34,7 +34,7 @@ Grep-verifiable: `rg "safe.cast" src/` audits all external data casts.
 
 ### `@intCast` Elimination Status
 
-All production code uses `safe.cast()` — zero `@intCast` remaining:
+Production readers and writers use `safe.cast()` — zero `@intCast` on file-provided data outside the compression codecs. Codec decoder paths still use `@intCast` (pending): `brotli.zig`, `zstd.zig`. The remaining `@intCast` in `gzip.zig`, `lz4.zig`, and `snappy.zig` are encoder-side only (gzip decodes via `std.compress.flate`).
 
 | Area | Files | `@intCast` Count |
 |------|-------|-----------------|
@@ -43,7 +43,7 @@ All production code uses `safe.cast()` — zero `@intCast` remaining:
 | Encoding | `encoding/*.zig` | 0 |
 | Thrift | `thrift/*.zig` | 0 |
 | Format | `format/*.zig` | 0 |
-| Compress | `compress/*.zig` | 0 |
+| Compress | `compress/*.zig` | decoder pending (`brotli.zig`, `zstd.zig`); encoder-only elsewhere |
 | Arrow Batch | `arrow_batch.zig` | 0 |
 | C API | `api/c/*.zig` | 0 |
 | WASM API | `api/wasm/*.zig` | 0 |
@@ -109,7 +109,7 @@ Extreme nanosecond values produce day counts outside i32 range. Replaced `catch 
 
 ### Decompression Safety
 
-**Gzip decompression** (`src/compress/gzip.zig`):
+**Gzip decompression** (`src/compress/c_gzip.zig`):
 - Maximum decompression size limit (256MB)
 - Compression ratio limit (1000x)
 - Safe casts for C API parameters
@@ -199,6 +199,16 @@ std.math.add(usize, a, b) catch return error.Overflow;
 std.math.sub(usize, a, b) catch return error.Underflow;
 ```
 
+## Fast Paths
+
+Each fast path keeps its bounds check at the granularity noted and falls back to the checked code for anything it does not cover.
+
+- **`rle.decodeBitPacked`** (`src/core/encoding/rle.zig`): loads one unaligned u64 per value while 8 bytes remain; the bounds check is one `byte_pos > last_word` per value. The checked per-byte loop handles the tail and zero-fills past the end of data.
+- **`column_decoder.decodeFlatPlainFixed`** (`src/core/column_decoder.zig`): flat V1 INT32/INT64/FLOAT/DOUBLE pages; one `needed` check per page (`count * width`, overflow-checked). Returns `null` for short or non-plain pages so the general decoder handles them and malformed-page errors are unchanged.
+- **`page_writer.writePlainPageOptional`** and **`rle_encoder.appendDefLevelsWithLength`** (write side): definition levels and values are written in place into one buffer. Byte identity with the general path is tested (`PLAIN fixed-width optional page is byte-identical...`, `appendDefLevelsWithLength is byte-identical...`); other encodings keep the general path.
+- **`crc32.zig`** (slicing-by-8 CRC-32): no fallback; tested against `std.hash.Crc32` for every length 0..2047, short inputs 1..16, a 1 MiB buffer, and unaligned offsets.
+- **Zero-copy byte arrays** (`column_decoder.borrow_bytes`): slices come only from length-checked decoders (`plain.decodeByteArray`, `PlainDecoder`). Page buffers are arena-owned and outlive the values because they are freed only by the arena reset or deinit. Filtered reads, FLBA, decimals, delta encodings, `arrow_batch` and the typed decoder copy instead.
+
 ## Guidelines for New Code
 
 ### Reader
@@ -207,6 +217,7 @@ std.math.sub(usize, a, b) catch return error.Underflow;
 3. **Use helpers** — `safePageSize`, `extractBitWidth`, etc.
 4. **Specific errors** — `InvalidBitWidth` over generic `InvalidData`
 5. **Comment `catch unreachable`** — explain the mathematical invariant
+6. **Evaluate a fallible payload before writing a union slot** — `slot = .{ .value = try f() }` writes the tag before the payload, so a cleanup that frees `.value` slots would free undefined bytes after the `try` fails. Write `const v = try f(); slot = .{ .value = v };`
 
 ### Writer
 1. **Validate at API boundary** — check sizes, counts, value ranges

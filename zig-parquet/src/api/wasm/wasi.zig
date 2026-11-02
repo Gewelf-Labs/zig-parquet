@@ -2010,10 +2010,12 @@ fn schemaNodeFromTypeInfo(handle: *RowWriterHandle, info: TypeInfo) !*const Sche
         .float_ => handle.allocSchemaNode(.{ .float = .{ .logical = info.logical } }),
         .double_ => handle.allocSchemaNode(.{ .double = .{ .logical = info.logical } }),
         .bytes => handle.allocSchemaNode(.{ .byte_array = .{ .logical = info.logical } }),
-        .fixed_bytes => handle.allocSchemaNode(.{ .fixed_len_byte_array = .{
-            .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
-            .logical = info.logical,
-        } }),
+        .fixed_bytes => handle.allocSchemaNode(.{
+            .fixed_len_byte_array = .{
+                .len = safe.castTo(u32, info.type_length orelse 0) catch unreachable, // type_length is at most 16
+                .logical = info.logical,
+            },
+        }),
         .nested => error.InvalidArgument,
     };
 }

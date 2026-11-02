@@ -417,6 +417,7 @@ fn assembleRecursive(
                 }
 
                 const item = try assembleRecursive(element, ctx, def_threshold + 1, rep_threshold + 1, depth + 1);
+                errdefer item.deinit(ctx.allocator);
                 try items.append(ctx.allocator, item);
                 first = false;
             }
@@ -496,7 +497,9 @@ fn assembleRecursive(
 
             for (s.fields) |schema_field| {
                 const field_value = try assembleRecursive(schema_field.node, ctx, def_threshold, rep_threshold, depth + 1);
+                errdefer field_value.deinit(ctx.allocator);
                 const name_copy = try ctx.allocator.dupe(u8, schema_field.name);
+                errdefer ctx.allocator.free(name_copy);
                 try fields.append(ctx.allocator, .{ .name = name_copy, .value = field_value });
                 ctx.column_index += schema_field.node.countLeafColumns();
             }
@@ -703,4 +706,50 @@ test "assembleValues not enough columns returns error" {
     };
 
     try std.testing.expectError(error.NotEnoughColumns, assembleValues(allocator, &schema, &slices, 1));
+}
+
+test "assembleValues frees partial values on OOM" {
+    const allocator = std.testing.allocator;
+
+    const id_node = SchemaNode{ .int64 = .{} };
+    const tag_node = SchemaNode{ .byte_array = .{} };
+    const tags_node = SchemaNode{ .list = &tag_node };
+    const schema = SchemaNode{ .struct_ = .{
+        .fields = &[_]SchemaNode.Field{
+            .{ .name = "id", .node = &id_node },
+            .{ .name = "tags", .node = &tags_node },
+        },
+    } };
+
+    const tags = [_]Value{ .{ .bytes_val = "a" }, .{ .bytes_val = "bb" } };
+    const fields = [_]Value.FieldValue{
+        .{ .name = "id", .value = .{ .int64_val = 7 } },
+        .{ .name = "tags", .value = .{ .list_val = &tags } },
+    };
+    const value = Value{ .struct_val = &fields };
+
+    var columns = try flattenValue(allocator, &schema, value);
+    defer columns.deinit();
+
+    var slices: [2]FlatColumnSlice = undefined;
+    for (columns.columns.items, 0..) |col, i| {
+        slices[i] = .{ .values = col.values.items, .def_levels = col.def_levels.items, .rep_levels = col.rep_levels.items };
+    }
+
+    // Fail each allocation in turn. Every failing run must free what it built;
+    // std.testing.allocator reports any leak from the backing allocator.
+    var succeeded = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const rows = assembleValues(failing.allocator(), &schema, &slices, 1) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        for (rows) |v| v.deinit(failing.allocator());
+        failing.allocator().free(rows);
+        succeeded = true;
+        break;
+    }
+    try std.testing.expect(succeeded);
 }

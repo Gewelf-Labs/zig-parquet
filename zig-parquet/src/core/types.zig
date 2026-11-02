@@ -376,7 +376,7 @@ pub const DecimalValue = struct {
         if (raw_bytes.len > 16) return error.InvalidDecimalLength;
 
         var result = DecimalValue{
-            .bytes = [_]u8{0} ** 16,
+            .bytes = @as([16]u8, @splat(0)),
             .byte_len = safe.castTo(u8, raw_bytes.len) catch unreachable, // checked <= 16 above
             .precision = precision,
             .scale = scale,
@@ -413,7 +413,7 @@ pub const DecimalValue = struct {
     pub fn format(
         self: DecimalValue,
         comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;
@@ -539,7 +539,7 @@ pub fn Decimal(comptime precision: comptime_int, comptime scale: comptime_int) t
         /// Convert to the runtime DecimalValue type
         pub fn toDecimalValue(self: Self) DecimalValue {
             var dv = DecimalValue{
-                .bytes = [_]u8{0} ** 16,
+                .bytes = @as([16]u8, @splat(0)),
                 .byte_len = byte_len,
                 .precision = precision,
                 .scale = scale,
@@ -574,7 +574,7 @@ pub fn Decimal(comptime precision: comptime_int, comptime scale: comptime_int) t
         pub fn format(
             self: Self,
             comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
+            options: std.fmt.Options,
             writer: anytype,
         ) !void {
             _ = fmt;
@@ -676,7 +676,7 @@ pub const Interval = struct {
     pub fn format(
         self: Interval,
         comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
+        options: std.fmt.Options,
         writer: anytype,
     ) !void {
         _ = fmt;
@@ -795,7 +795,7 @@ pub fn Optional(comptime T: type) type {
         pub fn format(
             self: Self,
             comptime _: []const u8,
-            _: std.fmt.FormatOptions,
+            _: std.fmt.Options,
             writer: anytype,
         ) !void {
             switch (self) {
