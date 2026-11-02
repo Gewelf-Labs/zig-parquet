@@ -129,7 +129,10 @@ fmt:
 
 FUZZ_CACHE = $(if $(filter 0.16.%,$(ZIG_VERSION)),$(LIB_DIR)/.zig-cache,.zig17/cache)
 
-.PHONY: fuzz-run fuzz-replay fuzz-cov
+.PHONY: fuzz-run fuzz-replay fuzz-install fuzz-cov
+fuzz-install:
+	cd $(LIB_DIR) && $(ZIG) build fuzz-install $(call zcache,..) -Dcodecs=zig-only
+
 fuzz-run:
 	@test -n "$(TARGET)" || { echo "usage: make fuzz-run TARGET=<target> [SECONDS=60] [SEED=n] [OPT=ReleaseSafe]"; exit 1; }
 	cd $(LIB_DIR) && $(ZIG) build fuzz $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -Doptimize=$(or $(OPT),ReleaseSafe) -- $(TARGET) run $(or $(SECONDS),60)s --out .fuzz-out/$(TARGET) $(if $(SEED),--seed $(SEED))
