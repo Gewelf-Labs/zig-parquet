@@ -200,11 +200,12 @@ pub fn Decoder(comptime T: type) type {
         }
 
         fn readSignedVarint(self: *Self) Error!i64 {
-            // Zigzag decode
+            // Zigzag decode: (n >> 1) ^ -(n & 1). The shift must be logical on the u64 bit
+            // pattern; an arithmetic shift turns zigzag values with the top bit set (|v| >= 2^62) wrong.
             const unsigned = try self.readUnsignedVarint();
-            // Zigzag: (n >> 1) ^ -(n & 1)
-            const n: i64 = @bitCast(unsigned);
-            return (n >> 1) ^ (-(n & 1));
+            const magnitude: i64 = @bitCast(unsigned >> 1);
+            const sign: i64 = @bitCast(0 -% (unsigned & 1));
+            return magnitude ^ sign;
         }
 
         fn unpackMiniBlock(
@@ -363,6 +364,21 @@ test "delta binary packed i64" {
     try std.testing.expectEqual(@as(i64, 100), result[0]);
     try std.testing.expectEqual(@as(i64, 101), result[1]);
     try std.testing.expectEqual(@as(i64, 102), result[2]);
+}
+
+test "regress: dbp i64 first value maxInt (zigzag top bit set)" {
+    const allocator = std.testing.allocator;
+    // zigzag(maxInt) = 2^64 - 2 as ULEB128; an arithmetic shift decoded it as -1.
+    const data = [_]u8{
+        0x80, 0x01, // block_size = 128
+        0x04, // num_mini_blocks = 4
+        0x01, // total_values = 1
+        0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, // first_value = maxInt
+    };
+    const result = try decodeInt64(allocator, &data);
+    defer allocator.free(result);
+
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), result[0]);
 }
 
 test "delta binary packed varint overflow" {
