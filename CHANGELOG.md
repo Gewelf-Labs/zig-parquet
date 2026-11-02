@@ -48,6 +48,10 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - Brotli decompression read code-length bits past the end of truncated input (integer overflow); malformed prefix codes are now rejected as in RFC 7932.
 - Gzip decompression panicked on some truncated streams under Zig 0.16 (a sign error in std 0.16's inflate, fixed in 0.17); it now returns `error.DecompressionError` on both versions.
 - Leaks on malformed footers: repeated `ColumnIndex`/`OffsetIndex` fields and partially parsed page headers are freed.
+- `DynamicReader.deinit`, and the C and WASM reader handles, leaked schema logical-type payloads such as a GEOGRAPHY `crs`. They now free the whole footer.
+- Leaks when a page fails to decode part-way: def/rep levels and byte values already copied are freed. Also fixed a leak when an allocation fails while a nested column result is assembled.
+- Untrusted counts could ask for huge allocations: a page claiming more values than its column chunk, a column chunk past the end of the file, a row group whose `num_rows` exceeds the values actually decoded, and a dictionary with more entries than its page can hold. Each now returns an error before allocating.
+- List and map columns with fewer repetition levels than definition levels panicked; they now return `error.InvalidRepetitionLevels`.
 - Bit unpacking overflowed `u5` for bit widths 25-31: the byte count was computed in `u5`. This panicked in Debug builds and gave a wrong byte count in ReleaseFast. Fixed by computing in `usize`.
 - Overflow-checked level and bit-pack sizes: `bitPackedSize` returns `error.Overflow`, and V2 level cursor checks are overflow-safe.
 - Out-of-memory leaks: footer parsers (`ColumnChunk`, `Statistics`, `RowGroup`, `SchemaElement`, `KeyValue`, `FileMetaData`) free partial allocations; nested assembly frees the partial list item and struct field; dynamic decoders free def/rep levels and page results.
