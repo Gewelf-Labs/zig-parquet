@@ -568,4 +568,34 @@ test "fuzz corpus expectations" {
             return error.UnexpectedOutcome;
         }
     }
+
+    // Every committed regression input must have a line: a missing expectation is an error.
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    inline for (comptime std.enums.values(Target)) |target| {
+        var files: std.ArrayList([]const u8) = .empty;
+        listInputs(a, io, corpus_root ++ "/" ++ @tagName(target), &files) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => return e,
+        };
+        for (files.items) |file| {
+            const name = std.fs.path.basename(file);
+            if (!std.mem.startsWith(u8, name, "regress-")) continue;
+            const key = try std.fmt.allocPrint(a, "{s}/{s}", .{ @tagName(target), name });
+            if (!hasExpectation(text, key)) {
+                std.debug.print("expected.txt: no line for {s}\n", .{key});
+                return error.MissingExpectation;
+            }
+        }
+    }
+}
+
+fn hasExpectation(text: []const u8, key: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        var fields = std.mem.tokenizeAny(u8, std.mem.trim(u8, raw_line, " \t\r"), " \t");
+        if (std.mem.eql(u8, fields.next() orelse continue, key)) return true;
+    }
+    return false;
 }

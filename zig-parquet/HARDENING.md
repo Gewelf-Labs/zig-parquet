@@ -231,3 +231,49 @@ rg "@intCast" src/ --type zig -c    # Should be 0 outside tests
 rg "catch unreachable" src/ --type zig  # Each should have an invariant comment
 rg "\[.*\.\.\]\[0\.\." src/ --type zig  # Check for unchecked slicing
 ```
+
+## Fuzzing and regressions
+
+Every untrusted-input surface has a fuzz target in `fuzz/` (plan:
+`docs/superpowers/plans/2026-11-02-correctness-fuzzing-plan.md`; background:
+`docs/previous-art/parquet-fuzzing-and-correctness.md`).
+
+| Target | Surface |
+|---|---|
+| `file`, `file-oom` | Whole file through `readAllRows`, `rowIterator`, `rowIteratorStreaming` and projected reads, which must agree; `file-oom` adds an injected allocation failure |
+| `page` | One page through the column decoder: every physical type, encoding, V1/V2, levels, dictionaries |
+| `encoding` | Encoder to decoder round trips, and raw bytes into every decoder |
+| `thrift` | Footer, page header and page-index parsing, with allocation-failure injection |
+| `codec` | The five pure-Zig decompressors, and compress/decompress round trips |
+
+The oracle on every input: no panic, no leak, no live allocation over 256 MiB, no hang over 10 s,
+and reader modes that succeed must return equal rows. A rejected input (an error) is a pass.
+
+### Commands (repo root)
+
+```bash
+make fuzz-run TARGET=file SECONDS=60          # mutation loop, all OSes; findings in zig-parquet/.fuzz-out/<target>/
+make fuzz-replay TARGET=file FILES=<file|dir> # replay inputs
+make fuzz-cov N=200K                          # Zig's coverage-guided fuzzer: Linux/macOS only (ReleaseSafe on 0.16)
+make fuzz-install                             # build zig-out/bin/zp-fuzz for the minimizer
+python zig-parquet/fuzz/minimize.py <target> <in> <out>
+```
+
+`zig build test` replays every seed and every committed corpus input through its target.
+
+### When a target finds something
+
+1. Save the input (`.fuzz-out/<target>/current.bin`, or `tail -c +5 <cache>/f/crash` for `fuzz-cov`).
+2. Minimize it with `minimize.py`.
+3. Fix the root cause in the shared function at the trust boundary. Never loosen validation,
+   catch a panic, or special-case the input.
+4. Promote it: commit the minimized input as
+   `fuzz/corpus/<target>/regress-<yyyymmdd>-<area>-<slug>.bin` and add a line
+   `<target>/<file> ok | error.<Name> | error` to `fuzz/corpus/expected.txt`. Prefer the exact
+   `error.<Name>`, so error-class drift fails too. `zig build test` fails if a `regress-*` file has
+   no line. Wrong values from a valid file also get a `test "regress: <slug>"` unit test.
+5. A valid file (another engine reads it) that we reject is a compatibility gap, not a fuzz bug:
+   add it to `test-files-wild/` with a line in `expected-failures.txt`.
+
+Valid seeds that legitimately exceed the allocation cap are listed in `oversized_seeds` in
+`fuzz/fuzz.zig`.

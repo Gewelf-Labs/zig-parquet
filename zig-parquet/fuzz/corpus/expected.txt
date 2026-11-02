@@ -4,3 +4,4 @@
 #   error.<Name> rejected with exactly that error
 #   error        rejected, any error
 # The file is zig-parquet/fuzz/corpus/<target>/<file>, a minimized raw input (not Smith-encoded).
+thrift/regress-20261102-empty-footer.bin error.EndOfData
