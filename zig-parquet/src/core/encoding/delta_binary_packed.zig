@@ -104,8 +104,9 @@ pub fn Decoder(comptime T: type) type {
             while (values_decoded < self.total_values) {
                 // Read block header
                 const min_delta_raw = try self.readSignedVarint();
-                // Validate min_delta fits in T
-                const min_delta = std.math.cast(T, min_delta_raw) orelse return error.InvalidValueCount;
+                // Spec: min_delta may be any i64 from another writer; take it modulo T's width,
+                // matching the wrapping delta arithmetic below.
+                const min_delta: T = @truncate(min_delta_raw);
 
                 // Read bit widths for each mini-block.
                 // pos <= data.len is an invariant of this decoder.
@@ -220,29 +221,30 @@ pub fn Decoder(comptime T: type) type {
 
             // bit_width <= 64: caller rejects wider values before the mini-block multiply
             var bit_pos: usize = 0;
-            const mask = if (bit_width >= 64) ~@as(u64, 0) else (@as(u64, 1) << (safe.castTo(u6, bit_width) catch unreachable)) - 1; // caller rejects bit_width > 64
+            const mask: u128 = (@as(u128, 1) << (safe.castTo(u7, bit_width) catch unreachable)) - 1; // caller rejects bit_width > 64
 
             for (output) |*out| {
                 // Extract bit_width bits starting at bit_pos
                 const byte_pos = bit_pos / 8;
                 const bit_offset: u6 = safe.castTo(u6, bit_pos % 8) catch unreachable; // bit_pos % 8 is strictly 0-7, fits u6
 
-                // Read up to 8 bytes (enough for 64 bits)
-                var value: u64 = 0;
-                const bytes_needed = (bit_offset + bit_width + 7) / 8;
+                // A 64-bit value at a non-zero bit offset spans 9 bytes, so gather into u128.
+                var value: u128 = 0;
+                const bytes_needed = (@as(usize, bit_offset) + bit_width + 7) / 8;
 
                 const bytes_to_read = @min(bytes_needed, packed_data.len - byte_pos);
-                for (0..@min(bytes_to_read, 8)) |i| {
-                    value |= @as(u64, packed_data[byte_pos + i]) << (safe.castTo(u6, i * 8) catch unreachable); // i < 8, so i * 8 <= 56, fits u6
+                for (0..bytes_to_read) |i| {
+                    value |= @as(u128, packed_data[byte_pos + i]) << (safe.castTo(u7, i * 8) catch unreachable); // i < 9, so i * 8 <= 64, fits u7
                 }
 
                 // Shift and mask
                 value = (value >> bit_offset) & mask;
+                const relative: u64 = @truncate(value);
 
                 // Add min_delta and accumulate
                 // The packed value is an unsigned offset from min_delta
                 // Do all arithmetic in i128 to avoid overflow, then truncate to T
-                const delta_i128: i128 = @as(i128, min_delta) + @as(i128, value);
+                const delta_i128: i128 = @as(i128, min_delta) + @as(i128, relative);
                 const last_i128: i128 = @as(i128, last_value.*);
                 const new_value_i128 = last_i128 + delta_i128;
                 const new_value: T = @truncate(@as(i64, @truncate(new_value_i128)));
@@ -433,4 +435,21 @@ test "delta binary packed accepts large mini-blocks at bit width 0" {
     defer allocator.free(values);
     try std.testing.expectEqual(@as(usize, 2049), values.len);
     for (values) |v| try std.testing.expectEqual(@as(i32, 0), v);
+}
+
+test "regress: dbp i32 out-of-range min_delta wraps to T" {
+    const allocator = std.testing.allocator;
+    // min_delta = 2^32 + 1 (zigzag 2^33 + 2 = 82 80 80 80 20) is outside i32; it wraps to 1.
+    const data = [_]u8{
+        0x80, 0x01, // block_size = 128
+        0x04, // num_mini_blocks = 4
+        0x03, // total_values = 3
+        0x00, // first_value = 0
+        0x82, 0x80, 0x80, 0x80, 0x20, // min_delta = 2^32 + 1
+        0x00, 0x00, 0x00, 0x00, // bit_widths all 0
+    };
+    const result = try decodeInt32(allocator, &data);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualSlices(i32, &[_]i32{ 0, 1, 2 }, result);
 }
