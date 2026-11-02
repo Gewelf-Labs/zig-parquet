@@ -164,41 +164,7 @@ pub const ReaderHandle = struct {
     pub fn close(self: *ReaderHandle) void {
         const allocator = self.allocator;
 
-        for (self.metadata.schema) |elem| {
-            if (elem.name.len > 0) allocator.free(elem.name);
-        }
-        allocator.free(self.metadata.schema);
-
-        for (self.metadata.row_groups) |rg| {
-            for (rg.columns) |col| {
-                if (col.meta_data) |meta| {
-                    allocator.free(meta.encodings);
-                    for (meta.path_in_schema) |path| allocator.free(path);
-                    allocator.free(meta.path_in_schema);
-                    if (meta.statistics) |stats| {
-                        if (stats.max) |m| allocator.free(m);
-                        if (stats.min) |m| allocator.free(m);
-                        if (stats.max_value) |m| allocator.free(m);
-                        if (stats.min_value) |m| allocator.free(m);
-                    }
-                    if (meta.geospatial_statistics) |geo_stats| {
-                        if (geo_stats.geospatial_types) |gt| allocator.free(gt);
-                    }
-                }
-            }
-            if (rg.sorting_columns) |sc| allocator.free(sc);
-            allocator.free(rg.columns);
-        }
-        allocator.free(self.metadata.row_groups);
-
-        if (self.metadata.key_value_metadata) |kvs| {
-            for (kvs) |kv| {
-                allocator.free(kv.key);
-                if (kv.value) |v| allocator.free(v);
-            }
-            allocator.free(kvs);
-        }
-        if (self.metadata.created_by) |cb| allocator.free(cb);
+        self.metadata.deinit(allocator);
         allocator.free(self.footer_data);
 
         switch (self.backend) {

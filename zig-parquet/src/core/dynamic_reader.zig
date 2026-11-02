@@ -119,54 +119,7 @@ pub const DynamicReader = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Free schema element names
-        for (self.metadata.schema) |elem| {
-            if (elem.name.len > 0) {
-                self.allocator.free(elem.name);
-            }
-        }
-        self.allocator.free(self.metadata.schema);
-
-        // Free row groups
-        for (self.metadata.row_groups) |rg| {
-            for (rg.columns) |col| {
-                if (col.file_path) |fp| self.allocator.free(fp);
-                if (col.meta_data) |meta| {
-                    self.allocator.free(meta.encodings);
-                    for (meta.path_in_schema) |path| {
-                        self.allocator.free(path);
-                    }
-                    self.allocator.free(meta.path_in_schema);
-                    if (meta.statistics) |stats| {
-                        if (stats.max) |m| self.allocator.free(m);
-                        if (stats.min) |m| self.allocator.free(m);
-                        if (stats.max_value) |m| self.allocator.free(m);
-                        if (stats.min_value) |m| self.allocator.free(m);
-                    }
-                    // Free geospatial statistics if present
-                    if (meta.geospatial_statistics) |geo_stats| {
-                        if (geo_stats.geospatial_types) |gt| self.allocator.free(gt);
-                    }
-                }
-            }
-            if (rg.sorting_columns) |sc| self.allocator.free(sc);
-            self.allocator.free(rg.columns);
-        }
-        self.allocator.free(self.metadata.row_groups);
-
-        // Free key-value metadata
-        if (self.metadata.key_value_metadata) |kvs| {
-            for (kvs) |kv| {
-                self.allocator.free(kv.key);
-                if (kv.value) |v| self.allocator.free(v);
-            }
-            self.allocator.free(kvs);
-        }
-
-        // Free created_by
-        if (self.metadata.created_by) |cb| {
-            self.allocator.free(cb);
-        }
+        self.metadata.deinit(self.allocator);
 
         self.allocator.free(self.footer_data);
 
