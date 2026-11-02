@@ -386,6 +386,9 @@ fn assembleRecursive(
                 return .{ .null_val = {} };
             }
 
+            // Repetition levels are indexed in step with definition levels below; a page that
+            // decoded fewer of them (missing or short level stream) is malformed.
+            if (col.rep_levels.len < col.def_levels.len) return error.InvalidRepetitionLevels;
             const def = col.def_levels[pos];
             if (def < def_threshold) {
                 // Null list (for required lists this never triggers; for optional
@@ -432,6 +435,9 @@ fn assembleRecursive(
                 return .{ .null_val = {} };
             }
 
+            // Repetition levels are indexed in step with definition levels below; a page that
+            // decoded fewer of them (missing or short level stream) is malformed.
+            if (col.rep_levels.len < col.def_levels.len) return error.InvalidRepetitionLevels;
             const def = col.def_levels[pos];
             if (def < def_threshold) {
                 // Null map (for required maps, this never triggers; for optional
@@ -706,6 +712,19 @@ test "assembleValues not enough columns returns error" {
     };
 
     try std.testing.expectError(error.NotEnoughColumns, assembleValues(allocator, &schema, &slices, 1));
+}
+
+test "regress: assembleValues rejects list columns with missing repetition levels" {
+    const element = SchemaNode{ .int32 = .{} };
+    const schema = SchemaNode{ .list = &element };
+
+    const values = [_]Value{ .{ .int32_val = 1 }, .{ .int32_val = 2 } };
+    const def_levels = [_]u32{ 1, 1 };
+    const slices = [_]FlatColumnSlice{
+        .{ .values = &values, .def_levels = &def_levels, .rep_levels = &.{} },
+    };
+
+    try std.testing.expectError(error.InvalidRepetitionLevels, assembleValues(std.testing.allocator, &schema, &slices, 1));
 }
 
 test "assembleValues frees partial values on OOM" {
