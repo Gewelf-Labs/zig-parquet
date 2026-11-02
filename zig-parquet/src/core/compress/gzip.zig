@@ -869,14 +869,22 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     var out: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(allocator, uncompressed_size) catch return error.OutOfMemory;
     errdefer out.deinit();
 
+    // Zig 0.16's flate decoder panics (integer overflow in peekBitsEnding) on a stream that ends
+    // mid-symbol: its tossBitsShort bound reads `bufferedLen() * 8 + consumed_bits` where 0.17 has
+    // `-`. It only takes that path after a 4-byte bit peek hits EndOfStream, which a valid member
+    // never does: its 8-byte footer follows the deflate data. So read from a copy with spare
+    // capacity behind a stream that always fails: running off the end is error.ReadFailed.
+    const input = allocator.alloc(u8, compressed.len + 8) catch return error.OutOfMemory;
+    defer allocator.free(input);
+    @memcpy(input[0..compressed.len], compressed);
+    var in: std.Io.Reader = .{ .vtable = std.Io.Reader.failing.vtable, .buffer = input, .seek = 0, .end = compressed.len };
+
     // Handle concatenated gzip members (RFC 1952 §2.2)
     // Use .gzip container mode so std.compress.flate handles header/footer parsing.
-    var in: std.Io.Reader = .fixed(compressed);
-
     while (true) {
         // Check if there's another gzip member (need at least magic + method = 3 bytes)
         if (in.seek >= in.end) break;
-        const remaining = compressed[in.seek..];
+        const remaining = in.buffered();
         if (remaining.len < 10) break;
         if (remaining[0] != 0x1f or remaining[1] != 0x8b) break;
 
@@ -924,6 +932,19 @@ test "gzip rejects corrupted payload" {
     compressed[10] ^= 0x01;
 
     try std.testing.expectError(error.DecompressionError, decompress(allocator, compressed, original.len));
+}
+
+test "gzip rejects every truncation of a valid stream" {
+    const allocator = std.testing.allocator;
+    var data: [2000]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @truncate(i * i >> 3);
+    const compressed = try compress(allocator, &data);
+    defer allocator.free(compressed);
+
+    // Under 10 bytes there is no member header: nothing to decode, empty output.
+    for (10..compressed.len) |n| {
+        try std.testing.expectError(error.DecompressionError, decompress(allocator, compressed[0..n], data.len));
+    }
 }
 
 test "huffman code lengths respect max_bits and stay a complete prefix code" {
