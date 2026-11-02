@@ -15,3 +15,5 @@ codec/regress-20261102-gzip-cl-tree-overflow.bin ok
 codec/regress-20261102-brotli-cl-length-overrun.bin error.DecompressionError
 codec/regress-20261102-gzip-flate-truncated-overflow.bin error.DecompressionError
 file/regress-20261102-geography-crs-leak.bin ok
+page/regress-20261102-bss-f64-levels-leak.bin error.InvalidArgument
+page/regress-20261102-dict-f64-levels-leak.bin error.InvalidBitWidth

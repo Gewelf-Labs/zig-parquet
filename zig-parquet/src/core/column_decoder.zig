@@ -1936,6 +1936,7 @@ fn decodeDynamicBoolRLE(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2171,6 +2172,7 @@ fn decodeDictFloat32(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2222,6 +2224,7 @@ fn decodeDictFloat64(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2492,6 +2495,7 @@ fn decodeDynamicInt96(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2532,6 +2536,7 @@ fn decodeDictInt96(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2654,6 +2659,7 @@ fn decodeDeltaBinaryPacked(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2739,6 +2745,7 @@ fn decodeDeltaLengthByteArray(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2800,6 +2807,7 @@ fn decodeDeltaByteArray(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2861,6 +2869,7 @@ fn decodeByteStreamSplit(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
