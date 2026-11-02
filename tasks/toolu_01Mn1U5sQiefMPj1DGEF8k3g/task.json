@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01Mn1U5sQiefMPj1DGEF8k3g",
+  "agent_id": "a2e9d4108bfb841f5",
+  "task_description": "Sonnet: fuzz ground-truth benchmark",
+  "token_usage": {
+    "input_tokens": 124,
+    "cache_creation_tokens": 968086,
+    "cache_read_tokens": 4860398,
+    "output_tokens": 21298,
+    "api_call_count": 62
+  },
+  "started_at": "2026-11-02T14:05:35.9952052-05:00",
+  "completed_at": "2026-11-02T15:24:45.8763927-05:00"
+}
