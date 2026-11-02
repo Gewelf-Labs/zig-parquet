@@ -101,3 +101,90 @@ test "LogicalType.parse frees the earlier geo crs when field 1 repeats" {
     defer lt.deinit(allocator);
     try std.testing.expectEqualStrings("EPSG:3857", lt.geometry.crs.?);
 }
+
+test "ColumnIndex.parse frees everything on OOM" {
+    const allocator = std.testing.allocator;
+    // Fields 1 (null_pages), 2 (min), 3 (max), 5 (null_counts); every one allocates.
+    const data = [_]u8{
+        0x19, 0x12, 0x02, // field 1: list<bool> of 1 element, false
+        0x19, 0x18, 0x02, 'a', 'a', // field 2: list<binary> of 1 element "aa"
+        0x19, 0x18, 0x02, 'b', 'b', // field 3: list<binary> of 1 element "bb"
+        0x29, 0x16, 0x02, // field 5: list<i64> of 1 element, 1
+        0x00, // stop
+    };
+
+    var succeeded = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var reader = thrift.CompactReader.init(&data);
+        var ci = format.page_index.ColumnIndex.parse(failing.allocator(), &reader) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        ci.deinit(failing.allocator());
+        succeeded = true;
+        break;
+    }
+    try std.testing.expect(succeeded);
+    try std.testing.expect(fail_index > 0);
+}
+
+test "ColumnIndex.parse frees the earlier lists when a field repeats" {
+    const allocator = std.testing.allocator;
+    const data = [_]u8{
+        0x29, 0x18, 0x02, 'a', 'a', // field 2: list<binary> "aa"
+        0x09, 0x04, 0x18, 0x02, 'b', 'b', // field 2 again (long form): "bb"
+        0x39, 0x16, 0x02, // field 5: list<i64> [1]
+        0x09, 0x0A, 0x16, 0x04, // field 5 again (long form): [2]
+        0x00, // stop
+    };
+    var reader = thrift.CompactReader.init(&data);
+    var ci = try format.page_index.ColumnIndex.parse(allocator, &reader);
+    defer ci.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), ci.min_values.len);
+    try std.testing.expectEqualStrings("bb", ci.min_values[0]);
+    try std.testing.expectEqual(@as(i64, 2), ci.null_counts.?[0]);
+}
+
+test "OffsetIndex.parse frees everything on OOM" {
+    const allocator = std.testing.allocator;
+    // Field 1 (page_locations, one struct) and field 2 (unencoded byte counts).
+    const data = [_]u8{
+        0x19, 0x1C, 0x16, 0x64, 0x00, // field 1: list<PageLocation> of 1, offset 50
+        0x19, 0x16, 0x06, // field 2: list<i64> of 1 element, 3
+        0x00, // stop
+    };
+
+    var succeeded = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var reader = thrift.CompactReader.init(&data);
+        var oi = format.page_index.OffsetIndex.parse(failing.allocator(), &reader) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        oi.deinit(failing.allocator());
+        succeeded = true;
+        break;
+    }
+    try std.testing.expect(succeeded);
+    try std.testing.expect(fail_index > 0);
+}
+
+test "OffsetIndex.parse frees the earlier page locations when field 1 repeats" {
+    const allocator = std.testing.allocator;
+    const data = [_]u8{
+        0x19, 0x1C, 0x16, 0x64, 0x00, // field 1: list of 1 PageLocation, offset 50
+        0x09, 0x02, 0x1C, 0x00, // field 1 again (long form): list of 1 empty PageLocation
+        0x00, // stop
+    };
+    var reader = thrift.CompactReader.init(&data);
+    var oi = try format.page_index.OffsetIndex.parse(allocator, &reader);
+    defer oi.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), oi.page_locations.len);
+    try std.testing.expectEqual(@as(i64, 0), oi.page_locations[0].offset);
+}
