@@ -54,14 +54,11 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     );
 
     if (result != c.BROTLI_TRUE) {
-        allocator.free(dst);
         return error.CompressionError;
     }
 
     // Resize to actual compressed size
-    const resized = allocator.realloc(dst, encoded_size) catch {
-        return dst[0..encoded_size];
-    };
+    const resized = allocator.realloc(dst, encoded_size) catch return error.OutOfMemory; // errdefer frees dst
     return resized;
 }
 
@@ -79,12 +76,10 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     );
 
     if (status != c.BROTLI_DECODER_RESULT_SUCCESS) {
-        allocator.free(result);
         return error.DecompressionError;
     }
 
     if (decoded_size != uncompressed_size) {
-        allocator.free(result);
         return error.DecompressionError;
     }
 

@@ -46,6 +46,7 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 
 ### Fixed
 - DELTA_BINARY_PACKED: deltas now wrap at the column's type width as the spec requires. INT32 columns with consecutive values more than 2^31 apart were written with a delta the reader rejected, and INT64 extremes panicked the encoder. The decoder also misread 58- to 63-bit-wide values at unaligned offsets. INT32 files whose `min_delta` needs more than 32 bits, as older zig-parquet wrote them, now decode correctly.
+- C codec wrappers (`c-brotli`, `c-gzip`, `c-lz4`, `c-snappy`, `c-zstd`) freed their output buffer twice on a decompression or compression error, which crashed on Linux. When shrinking the output failed, they also returned a slice shorter than the allocation. Both are fixed.
 - Brotli decompression read code-length bits past the end of truncated input (integer overflow); malformed prefix codes are now rejected as in RFC 7932.
 - Gzip decompression panicked on some truncated streams under Zig 0.16 (a sign error in std 0.16's inflate, fixed in 0.17); it now returns `error.DecompressionError` on both versions.
 - Leaks on malformed footers: repeated `ColumnIndex`/`OffsetIndex` fields and partially parsed page headers are freed.

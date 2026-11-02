@@ -33,14 +33,11 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     );
 
     if (compressed_size <= 0) {
-        allocator.free(dst);
         return error.CompressionError;
     }
 
     // Resize to actual compressed size
-    const resized = allocator.realloc(dst, safe.castTo(usize, compressed_size) catch return error.CompressionError) catch {
-        return dst[0 .. safe.castTo(usize, compressed_size) catch return error.CompressionError];
-    };
+    const resized = allocator.realloc(dst, safe.castTo(usize, compressed_size) catch return error.CompressionError) catch return error.OutOfMemory; // errdefer frees dst
     return resized;
 }
 
@@ -57,12 +54,10 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     );
 
     if (decompressed_size < 0) {
-        allocator.free(result);
         return error.DecompressionError;
     }
 
     if ((safe.castTo(usize, decompressed_size) catch return error.DecompressionError) != uncompressed_size) {
-        allocator.free(result);
         return error.DecompressionError;
     }
 
