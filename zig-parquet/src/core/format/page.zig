@@ -9,6 +9,12 @@ pub const Encoding = types.Encoding;
 pub const PageType = types.PageType;
 pub const Statistics = statistics.Statistics;
 
+/// A repeated Thrift field replaces the value parsed earlier, so free that one first.
+fn replaceOwned(comptime T: type, allocator: std.mem.Allocator, slot: *?T, value: T) void {
+    if (slot.*) |*old| old.deinit(allocator);
+    slot.* = value;
+}
+
 /// Data page header
 pub const DataPageHeader = struct {
     num_values: i32 = 0,
@@ -26,6 +32,7 @@ pub const DataPageHeader = struct {
 
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var header = Self{};
+        errdefer header.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -35,7 +42,7 @@ pub const DataPageHeader = struct {
                 2 => header.encoding = try Encoding.fromInt(try reader.readI32()),
                 3 => header.definition_level_encoding = try Encoding.fromInt(try reader.readI32()),
                 4 => header.repetition_level_encoding = try Encoding.fromInt(try reader.readI32()),
-                5 => header.statistics = try Statistics.parse(allocator, reader),
+                5 => replaceOwned(Statistics, allocator, &header.statistics, try Statistics.parse(allocator, reader)),
                 else => try reader.skip(field.field_type),
             }
         }
@@ -92,6 +99,7 @@ pub const DataPageHeaderV2 = struct {
 
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var header = Self{};
+        errdefer header.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -104,7 +112,7 @@ pub const DataPageHeaderV2 = struct {
                 5 => header.definition_levels_byte_length = try reader.readI32(),
                 6 => header.repetition_levels_byte_length = try reader.readI32(),
                 7 => header.is_compressed = field.field_type == .bool_true,
-                8 => header.statistics = try Statistics.parse(allocator, reader),
+                8 => replaceOwned(Statistics, allocator, &header.statistics, try Statistics.parse(allocator, reader)),
                 else => try reader.skip(field.field_type),
             }
         }
@@ -180,6 +188,7 @@ pub const PageHeader = struct {
 
     pub fn parse(allocator: std.mem.Allocator, reader: *thrift.CompactReader) !Self {
         var header = Self{};
+        errdefer header.deinit(allocator);
         const saved_field_id = reader.last_field_id;
         reader.resetFieldTracking();
 
@@ -189,9 +198,9 @@ pub const PageHeader = struct {
                 2 => header.uncompressed_page_size = try reader.readI32(),
                 3 => header.compressed_page_size = try reader.readI32(),
                 4 => header.crc = try reader.readI32(),
-                5 => header.data_page_header = try DataPageHeader.parse(allocator, reader),
+                5 => replaceOwned(DataPageHeader, allocator, &header.data_page_header, try DataPageHeader.parse(allocator, reader)),
                 7 => header.dictionary_page_header = try DictionaryPageHeader.parse(allocator, reader),
-                8 => header.data_page_header_v2 = try DataPageHeaderV2.parse(allocator, reader),
+                8 => replaceOwned(DataPageHeaderV2, allocator, &header.data_page_header_v2, try DataPageHeaderV2.parse(allocator, reader)),
                 else => try reader.skip(field.field_type),
             }
         }

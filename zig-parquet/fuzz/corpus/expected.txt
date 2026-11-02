@@ -10,3 +10,4 @@ encoding/regress-20261102-dbp-i64-wrap.bin ok
 thrift/regress-20261102-columnindex-repeat.bin error.EndOfData
 thrift/regress-20261102-columnindex-repeat-2.bin error.EndOfData
 thrift/regress-20261102-offsetindex-repeat.bin error.EndOfData
+thrift/regress-20261102-pageheader-error-path.bin error.EndOfData

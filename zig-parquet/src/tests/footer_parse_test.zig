@@ -188,3 +188,44 @@ test "OffsetIndex.parse frees the earlier page locations when field 1 repeats" {
     try std.testing.expectEqual(@as(usize, 1), oi.page_locations.len);
     try std.testing.expectEqual(@as(i64, 0), oi.page_locations[0].offset);
 }
+
+test "PageHeader.parse frees partial headers on OOM" {
+    const allocator = std.testing.allocator;
+    // Field 5: DataPageHeader with statistics (max "x"); field 8: DataPageHeaderV2 with statistics (max "y").
+    const data = [_]u8{
+        0x5C, 0x5C, 0x18, 0x01, 'x', 0x00, 0x00, // field 5: DataPageHeader { statistics { max "x" } }
+        0x3C, 0x8C, 0x18, 0x01, 'y', 0x00, 0x00, // field 8: DataPageHeaderV2 { statistics { max "y" } }
+        0x00, // stop
+    };
+
+    var succeeded = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var reader = thrift.CompactReader.init(&data);
+        var header = format.PageHeader.parse(failing.allocator(), &reader) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        header.deinit(failing.allocator());
+        succeeded = true;
+        break;
+    }
+    try std.testing.expect(succeeded);
+    try std.testing.expect(fail_index > 0);
+}
+
+test "PageHeader.parse frees the earlier data page header when field 5 repeats" {
+    const allocator = std.testing.allocator;
+    const data = [_]u8{
+        0x5C, 0x5C, 0x18, 0x01, 'x', 0x00, 0x00, // field 5: DataPageHeader { statistics { max "x" } }
+        0x0C, 0x0A, 0x5C, 0x18, 0x01, 'x', 0x00, 0x00, // field 5 again (long form): same shape
+        0x00, // stop
+    };
+    var reader = thrift.CompactReader.init(&data);
+    var header = try format.PageHeader.parse(allocator, &reader);
+    defer header.deinit(allocator);
+
+    const stats = header.data_page_header.?.statistics.?;
+    try std.testing.expectEqualStrings("x", stats.max.?);
+}
