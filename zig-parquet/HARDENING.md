@@ -277,3 +277,29 @@ python zig-parquet/fuzz/minimize.py <target> <in> <out>
 
 Valid seeds that legitimately exceed the allocation cap are listed in `oversized_seeds` in
 `fuzz/fuzz.zig`.
+
+### Fuzz benchmark: time to find known bugs
+
+Each bug fixed on this branch was re-injected into a scratch worktree at e5a593c (the fix reverted) and
+the target run with seeds 1-3, at most 300 s each, empty `.fuzz-out`, Zig 0.16.0, `make fuzz-run`
+(ReleaseSafe, zig-only codecs, so overflow checks trap like Debug). Time is the median wall time of the
+mutation loop, with build excluded; "<2 s" means the finding came in the first seconds. A finding is a
+panic or leak report. Where a fix commit no longer reverse-applies, the injection was re-created by hand.
+
+| Bug (fix commit) | Injection | Target | Mode / OS | Seeds | Median time to find | Note |
+|---|---|---|---|---|---|---|
+| RLE/bit-pack byte count in `u5`, widths 25-31 (in cfd392e) | the two `@as(usize, ...)` widenings in `encoding/rle.zig` removed | `page` | ReleaseSafe / Windows | 1-3 | 2 s (1, 2, 2) | `integer overflow` in `decodeBitPacked` |
+| same | same | `encoding` | ReleaseSafe / Windows | 1-3 | 1 s (0, 1, 0) | `integer overflow` in `rle.decode` |
+| Union slot set from a failing `try` (5d4ad3f) | `git show 5d4ad3f -- zig-parquet/src/core` reverse-applied (clean) | `file-oom` | ReleaseSafe / Linux (WSL) | 1-3 | not found in 300 s | 2.7M-2.8M execs per seed; the unit-test OOM sweep is still the only layer that catches this one |
+| same | same | `file-oom` | ReleaseSafe / Windows | 1 | not found in 300 s | expected, the bug is masked on Windows |
+| FLBA dictionary page, BIT_PACKED levels out of bounds (e6dc68a) | reverse-applied (clean) | `page` | ReleaseSafe / Windows | 1-3 | 7 s (7, <1, 9) | slice-bounds panic in `decodeDynamicFixedByteArray` |
+| same | same | `file` | ReleaseSafe / Windows | 1-3 | not found in 300 s | about 2.5M execs per seed; page-header mutation does not reach the shape |
+| Geo CRS leak on failed or repeated LogicalType parse (a81dcb3) | reverse-applied (clean; src/core part only) | `thrift` | ReleaseSafe / Windows | 1-3 | <2 s | `fuzz-leak`; the saved inputs pass on the fixed tree |
+| Footer parse leak, RowGroup (c7c344e) | by hand: `errdefer rg.deinit`, the `columns` errdefer and the free-before-replace removed from `RowGroup.parse` (a plain `git apply -R` no longer compiles) | `thrift` | ReleaseSafe / Windows | 1-3 | <2 s | `fuzz-leak`; the saved inputs pass on the fixed tree |
+| V2 page `is_compressed = false` in a compressed chunk, dangling slices (25d3c36) | by hand: `chunk_alloc` / `free_chunk` re-added around `readColumnChunkData` in `dynamic_reader.zig` | `file` | ReleaseSafe / Windows | 1-3 | not found in 300 s | expected: every reader mode agrees on the same garbage (needs the value oracle, plan 4.2 / 2.6) |
+| `list<struct>` writer `num_children` (9cdfe67) | reverse-applied (clean) | `file` | ReleaseSafe / Windows | 1-3 | not found in 300 s | expected: the bug is in the writer, `file` only reads (plan 2.2 `roundtrip`) |
+| DELTA value-count cap (9ffc53a) | reverse-applied; the new unit test hunk did not apply, code hunks did | `file` | ReleaseSafe / Windows | 1-3 | not found in 300 s | expected: a rejection counts as a pass (plan 2.4 `spec`) |
+| Footer-parser OOM leaks (885b5e0) | not run | - | - | - | not run | not in the 1.10 injection list; c7c344e above covers the footer-parse leak class |
+
+The Windows runs of `page`, `encoding` and `thrift` found their bugs before the first progress line, so
+their times are bounded by process start. Some runs overlapped with another run on the same machine.
