@@ -121,7 +121,13 @@ pub fn runOne(target: Target, parent: Allocator, bytes: []const u8) Feedback {
 /// no injected failure); thrift takes the footer (bytes between the 4-byte length and "PAR1")
 /// with the prefix `ff ff 00 00` (no failure, which = FileMetaData); others skip.
 /// .bin files (fuzz/corpus/<target>/) are already in target format.
+/// Valid files that legitimately need more than the 256 MiB live-allocation cap (a decompressed
+/// chunk over 2 GiB). They would trip `fuzz-oom` on the seed itself, so they are not seeds.
+/// ponytail: name list; replace with reader allocation limits if D5 lands.
+const oversized_seeds = [_][]const u8{"large_string_map.brotli.parquet"};
+
 fn adaptSeed(target: Target, name: []const u8, bytes: []const u8, out: Allocator) !?[]const u8 {
+    for (oversized_seeds) |skip| if (std.mem.eql(u8, std.fs.path.basename(name), skip)) return null;
     if (std.mem.endsWith(u8, name, ".bin")) return try out.dupe(u8, bytes);
     if (!std.mem.endsWith(u8, name, ".parquet")) return null;
     switch (target) {
