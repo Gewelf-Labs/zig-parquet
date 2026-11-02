@@ -18,3 +18,5 @@ file/regress-20261102-geography-crs-leak.bin ok
 page/regress-20261102-bss-f64-levels-leak.bin error.InvalidArgument
 page/regress-20261102-dict-f64-levels-leak.bin error.InvalidBitWidth
 page/regress-20261102-v2-bytearray-partial-leak.bin error.EndOfData
+file/regress-20261102-page-values-exceed-chunk-a.bin error.InvalidPageSize
+file/regress-20261102-page-values-exceed-chunk-b.bin error.InvalidPageSize

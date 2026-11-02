@@ -980,6 +980,10 @@ pub const DynamicReader = struct {
         var all_rep_levels: std.ArrayListUnmanaged(u32) = .empty;
         errdefer all_rep_levels.deinit(self.allocator);
 
+        // A page cannot hold more values than the chunk declares. Without this a header
+        // that claims 2^31 values makes the decoders allocate arrays that size from a few bytes.
+        var values_left = try safeRowCount(meta.num_values);
+
         // Loop through all data pages
         while (pos < page_data.len) {
             // Parse data page header
@@ -1022,6 +1026,8 @@ pub const DynamicReader = struct {
                 const num_values = try safePageSize(v2.num_values);
 
                 if (num_values == 0) continue;
+                if (num_values > values_left) return error.InvalidPageSize;
+                values_left -= num_values;
 
                 // Extract level data (uncompressed, at start of page body)
                 const rep_levels_data = try safe.slice(compressed_body, 0, rep_len);
@@ -1109,6 +1115,8 @@ pub const DynamicReader = struct {
 
                 const num_values = try safePageSize(dph.num_values);
                 if (num_values == 0) continue;
+                if (num_values > values_left) return error.InvalidPageSize;
+                values_left -= num_values;
 
                 // Get encodings from page header
                 const uses_dict_v1 = string_dict != null or int32_dict != null or int64_dict != null or float32_dict != null or float64_dict != null or fixed_byte_array_dict != null or int96_dict != null;
