@@ -1176,11 +1176,17 @@ pub const DynamicReader = struct {
             }
         }
 
-        return .{
-            .values = try all_values.toOwnedSlice(self.allocator),
-            .def_levels = if (all_def_levels.items.len > 0) try all_def_levels.toOwnedSlice(self.allocator) else null,
-            .rep_levels = if (all_rep_levels.items.len > 0) try all_rep_levels.toOwnedSlice(self.allocator) else null,
-        };
+        // Each toOwnedSlice empties its list (and its errdefer above), so own the results
+        // here until the struct is returned.
+        const values = try all_values.toOwnedSlice(self.allocator);
+        errdefer {
+            for (values) |v| v.deinit(self.allocator);
+            self.allocator.free(values);
+        }
+        const def_levels: ?[]u32 = if (all_def_levels.items.len > 0) try all_def_levels.toOwnedSlice(self.allocator) else null;
+        errdefer if (def_levels) |dl| self.allocator.free(dl);
+        const rep_levels: ?[]u32 = if (all_rep_levels.items.len > 0) try all_rep_levels.toOwnedSlice(self.allocator) else null;
+        return .{ .values = values, .def_levels = def_levels, .rep_levels = rep_levels };
     }
 
     /// Assemble rows from columnar data.
