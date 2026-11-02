@@ -40,7 +40,9 @@ jobs:
         run: uv run python generate.py
 
       - name: Fuzz
-        run: make fuzz-run TARGET=${{ matrix.target }} SECONDS=${{ inputs.seconds }} SEED=${{ github.run_id }}
+        env:
+          FUZZ_SECONDS: ${{ inputs.seconds }}
+        run: make fuzz-run TARGET=${{ matrix.target }} SECONDS="$FUZZ_SECONDS" SEED=${{ github.run_id }}
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -47,6 +47,7 @@ Real-world Parquet files from various sources for compatibility testing.
 | `fixed_length_byte_array.parquet` | EndOfData | Malformed: REQUIRED column with RLE-encoded nulls | Expected failure |
 | `ARROW-GH-41321.parquet` | InvalidBitWidth | Intentionally malformed bit width | Expected failure |
 | `ARROW-RS-GH-6229-DICTHEADER.parquet` | InvalidPageSize | Invalid dictionary header | Expected failure |
+| `ARROW-RS-GH-6229-LEVELS.parquet` | InvalidPageSize | Page claims more values than its column chunk | Expected failure |
 | `PARQUET-1481.parquet` | SchemaParseError | Intentionally malformed schema | Expected failure |
 | `nation.dict-malformed.parquet` | EndOfData | Intentionally corrupted dictionary | Expected failure |
 | `datapage_v1-corrupt-checksum.parquet` | PageChecksumMismatch | Intentionally corrupt CRC32 | Expected failure |
@@ -64,6 +65,7 @@ Legacy Hadoop LZ4 format differs from standard LZ4_RAW. Modern tools use LZ4_RAW
 Files from `bad_data/` designed to test error handling:
 - `PARQUET-1481.parquet` - Malformed schema
 - `ARROW-RS-GH-6229-DICTHEADER.parquet` - Invalid dictionary header
+- `ARROW-RS-GH-6229-LEVELS.parquet` - Insufficient repetition levels
 - `ARROW-GH-41321.parquet` - Malformed bit width
 - `nation.dict-malformed.parquet` - Corrupted dictionary
 
@@ -159,9 +161,9 @@ All shredded variant test cases pass validation.
 
 - **Hadoop LZ4** (3 files) - Deprecated format, replaced by LZ4_RAW
   - Modern Arrow/Spark use LZ4_RAW which we fully support
-- **Intentionally Invalid** (4 files) - Designed to test error handling
+- **Intentionally Invalid** (5 files) - Designed to test error handling
   - `PARQUET-1481.parquet`, `ARROW-RS-GH-6229-DICTHEADER.parquet`
-  - `ARROW-GH-41321.parquet`, `nation.dict-malformed.parquet`
+  - `ARROW-GH-41321.parquet`, `nation.dict-malformed.parquet`, `ARROW-RS-GH-6229-LEVELS.parquet`
 - **Corrupt Checksums** (2 files) - Intentionally corrupt CRC32
   - `datapage_v1-corrupt-checksum.parquet`, `rle-dict-uncompressed-corrupt-checksum.parquet`
 

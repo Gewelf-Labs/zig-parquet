@@ -199,6 +199,11 @@ std.math.add(usize, a, b) catch return error.Overflow;
 std.math.sub(usize, a, b) catch return error.Underflow;
 ```
 
+### Deliberate strictness
+
+- A data page whose `num_values` exceeds what is left of its column chunk's `num_values` is rejected with `error.InvalidPageSize`. Arrow C++ instead stops reading at the chunk total, and arrow-rs reads until the chunk's bytes run out, so a file from a writer that under-reports the chunk count reads (truncated) there and fails here. The check stays: RLE levels let a few bytes claim 2^31 values, and the chunk total is the only cheap bound before allocating.
+- A column chunk that extends past the end of the file is rejected with `error.InvalidPageSize` before its buffer is allocated, as Arrow C++ does.
+
 ## Fast Paths
 
 Each fast path keeps its bounds check at the granularity noted and falls back to the checked code for anything it does not cover.

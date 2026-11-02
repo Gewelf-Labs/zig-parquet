@@ -4,8 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Data corruption fix: GZIP pages
+### Data corruption fixes
 - **The pure-Zig gzip encoder wrote invalid deflate streams for ordinary data** (since v0.1.6, including v0.2.0). Its Huffman tree builder clamped codes deeper than the length limit, producing an oversubscribed prefix code, so neither zig-parquet nor zlib could read the page back. In tests, 33 of 128 realistic page payloads (timestamps, skewed bytes, text, 8 KiB to 1 MiB) were affected. **GZIP-compressed files written by zig-parquet v0.1.6 to v0.2.0 may contain unreadable pages; rewrite them with this version.** Files written with other codecs, or with the C gzip codec (`c-gzip`), are not affected.
+- **DELTA_BINARY_PACKED INT64 reads returned wrong values without an error** when a block's `first_value` or `min_delta` had a magnitude of 2^62 or more, such as random 64-bit IDs. The zigzag decode used an arithmetic shift, so such values came back off by 2^63 (2^62 read as -2^62). This affects files from any writer. Re-read affected data with this version.
 
 ### Performance
 - Streaming row iterator: `DynamicReader.rowIteratorStreaming()` and `rowIteratorStreamingProjected()` return a `StreamingRowIterator` that reuses one row buffer. Contract: the row and its byte slices are valid until the next `next()` or `deinit()`. Memory is bounded by one row group. If loading a row group fails, the next `next()` retries that row group.
@@ -44,7 +45,7 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - C codec dependencies are lazy: zig-only builds no longer fetch the C codec archives.
 
 ### Fixed
-- DELTA_BINARY_PACKED: deltas now wrap at the column's type width as the spec requires. INT32 columns with consecutive values more than 2^31 apart were written with a delta the reader rejected, and INT64 extremes panicked the encoder. The decoder also decoded zigzag values of 2^62 or more as -1, and misread 58- to 63-bit-wide values at unaligned offsets.
+- DELTA_BINARY_PACKED: deltas now wrap at the column's type width as the spec requires. INT32 columns with consecutive values more than 2^31 apart were written with a delta the reader rejected, and INT64 extremes panicked the encoder. The decoder also misread 58- to 63-bit-wide values at unaligned offsets. INT32 files whose `min_delta` needs more than 32 bits, as older zig-parquet wrote them, now decode correctly.
 - Brotli decompression read code-length bits past the end of truncated input (integer overflow); malformed prefix codes are now rejected as in RFC 7932.
 - Gzip decompression panicked on some truncated streams under Zig 0.16 (a sign error in std 0.16's inflate, fixed in 0.17); it now returns `error.DecompressionError` on both versions.
 - Leaks on malformed footers: repeated `ColumnIndex`/`OffsetIndex` fields and partially parsed page headers are freed.

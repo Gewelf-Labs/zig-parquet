@@ -1361,6 +1361,7 @@ pub const DynamicReader = struct {
                 error.InvalidArgument => error.InvalidArgument,
                 error.OutOfMemory => error.OutOfMemory,
                 error.InputOutput => error.InputOutput,
+                error.InvalidPageSize => error.InvalidPageSize,
                 else => error.InputOutput,
             };
         };
