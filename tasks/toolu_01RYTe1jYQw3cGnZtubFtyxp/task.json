@@ -1,0 +1,14 @@
+{
+  "tool_use_id": "toolu_01RYTe1jYQw3cGnZtubFtyxp",
+  "agent_id": "abeac67b1eeb63dd8",
+  "task_description": "Sonnet: fix decoder and reader leaks",
+  "token_usage": {
+    "input_tokens": 422,
+    "cache_creation_tokens": 1166490,
+    "cache_read_tokens": 44262731,
+    "output_tokens": 119640,
+    "api_call_count": 211
+  },
+  "started_at": "2026-11-02T11:17:13.1571663-05:00",
+  "completed_at": "2026-11-02T13:50:12.4537131-05:00"
+}
