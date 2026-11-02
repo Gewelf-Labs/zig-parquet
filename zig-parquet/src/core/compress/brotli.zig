@@ -204,6 +204,7 @@ const HuffmanTable = struct {
 
         // Secondary table lookup: entry.bits = secondary_table_bits + PRIMARY_TABLE_BITS,
         // entry.value = absolute offset to secondary table start.
+        if (peek_bits < PRIMARY_TABLE_BITS) return error.DecompressionError;
         reader.dropBits(PRIMARY_TABLE_BITS);
         const secondary_table_bits: u5 = @intCast(entry.bits - PRIMARY_TABLE_BITS);
         const secondary_idx = try reader.peekBits(secondary_table_bits);
@@ -1167,9 +1168,8 @@ fn readComplexHuffmanCodeWithSkip(allocator: std.mem.Allocator, reader: *BitRead
             repeat += repeat_delta + 3;
             var delta = repeat - old_repeat;
 
-            if (sym_idx + delta > alphabet_size) {
-                delta = @intCast(alphabet_size - sym_idx);
-            }
+            // RFC 7932 3.5: a repeat must not run past the alphabet.
+            if (sym_idx + delta > alphabet_size) return error.DecompressionError;
 
             if (new_len != 0) {
                 code_space -= @as(i32, @intCast(delta)) * (@as(i32, 32768) >> @intCast(new_len));
@@ -1181,6 +1181,9 @@ fn readComplexHuffmanCodeWithSkip(allocator: std.mem.Allocator, reader: *BitRead
             }
         }
     }
+
+    // RFC 7932 3.5: the code lengths must form a complete prefix code.
+    if (code_space != 0) return error.DecompressionError;
 
     return buildHuffmanTable(allocator, code_lengths, alphabet_size);
 }
@@ -1207,6 +1210,8 @@ fn readCodeLengthCodeLength(reader: *BitReader) Error!u8 {
     val >>= bit_offset;
     const idx: u4 = @intCast(val & 0xF);
 
+    // The peek above zero-pads past the end; consume only bits that exist.
+    if (reader.pos + prefix_lengths[idx] > reader.data.len * 8) return error.DecompressionError;
     reader.pos += prefix_lengths[idx];
     return prefix_values[idx];
 }

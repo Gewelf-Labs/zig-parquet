@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Data corruption fixes
+- **The pure-Zig gzip encoder wrote invalid deflate streams for ordinary data** (since v0.1.6, including v0.2.0). Its Huffman tree builder clamped codes deeper than the length limit, producing an oversubscribed prefix code, so neither zig-parquet nor zlib could read the page back. In tests, 33 of 128 realistic page payloads (timestamps, skewed bytes, text, 8 KiB to 1 MiB) were affected. **GZIP-compressed files written by zig-parquet v0.1.6 to v0.2.0 may contain unreadable pages; rewrite them with this version.** Files written with other codecs, or with the C gzip codec (`c-gzip`), are not affected.
+- **DELTA_BINARY_PACKED INT64 reads returned wrong values without an error** when a block's `first_value` or `min_delta` had a magnitude of 2^62 or more, such as random 64-bit IDs. The zigzag decode used an arithmetic shift, so such values came back off by 2^63 (2^62 read as -2^62). This affects files from any writer. Re-read affected data with this version.
+
 ### Performance
 - Streaming row iterator: `DynamicReader.rowIteratorStreaming()` and `rowIteratorStreamingProjected()` return a `StreamingRowIterator` that reuses one row buffer. Contract: the row and its byte slices are valid until the next `next()` or `deinit()`. Memory is bounded by one row group. If loading a row group fails, the next `next()` retries that row group.
 - Zero-copy byte arrays on flat reads: PLAIN and dictionary BYTE_ARRAY values (V1 and V2) are slices of the page buffer instead of per-value copies.
@@ -27,6 +31,7 @@ Benchmark, ReleaseFast, zig-only codecs, 1,000,000 rows, Zig 0.16.0, Ryzen 9 795
 Output bytes are unchanged: file sizes match the baseline in every scenario, and golden-byte tests cover the changed write paths.
 
 ### Added
+- Fuzz harness (`zig-parquet/fuzz/`): six targets (file, file-oom, page, encoding, thrift, codec) with a mutation loop that runs on every OS, Zig's coverage-guided fuzzer on Linux/macOS, corpus replay in `zig build test`, a minimizer and a regression convention. `make fuzz-run`, `make fuzz-replay`, `make fuzz-cov`. A manual-only GitHub workflow (`fuzz.yml`) runs it in CI on demand.
 - `Row.values_borrowed` flag (default `false`) for rows whose value block is owned by the producer.
 - `StreamingRowIterator` is exported from the package root.
 - `make bench` target (zig-only, ReleaseFast; `ROWS=<n>` sets the row count).
@@ -40,6 +45,15 @@ Output bytes are unchanged: file sizes match the baseline in every scenario, and
 - C codec dependencies are lazy: zig-only builds no longer fetch the C codec archives.
 
 ### Fixed
+- DELTA_BINARY_PACKED: deltas now wrap at the column's type width as the spec requires. INT32 columns with consecutive values more than 2^31 apart were written with a delta the reader rejected, and INT64 extremes panicked the encoder. The decoder also misread 58- to 63-bit-wide values at unaligned offsets. INT32 files whose `min_delta` needs more than 32 bits, as older zig-parquet wrote them, now decode correctly.
+- C codec wrappers (`c-brotli`, `c-gzip`, `c-lz4`, `c-snappy`, `c-zstd`) freed their output buffer twice on a decompression or compression error, which crashed on Linux. When shrinking the output failed, they also returned a slice shorter than the allocation. Both are fixed.
+- Brotli decompression read code-length bits past the end of truncated input (integer overflow); malformed prefix codes are now rejected as in RFC 7932.
+- Gzip decompression panicked on some truncated streams under Zig 0.16 (a sign error in std 0.16's inflate, fixed in 0.17); it now returns `error.DecompressionError` on both versions.
+- Leaks on malformed footers: repeated `ColumnIndex`/`OffsetIndex` fields and partially parsed page headers are freed.
+- `DynamicReader.deinit`, and the C and WASM reader handles, leaked schema logical-type payloads such as a GEOGRAPHY `crs`. They now free the whole footer.
+- Leaks when a page fails to decode part-way: def/rep levels and byte values already copied are freed. Also fixed a leak when an allocation fails while a nested column result is assembled.
+- Untrusted counts could ask for huge allocations: a page claiming more values than its column chunk, a column chunk past the end of the file, a row group whose `num_rows` exceeds the values actually decoded, and a dictionary with more entries than its page can hold. Each now returns an error before allocating.
+- List and map columns with fewer repetition levels than definition levels panicked; they now return `error.InvalidRepetitionLevels`.
 - Bit unpacking overflowed `u5` for bit widths 25-31: the byte count was computed in `u5`. This panicked in Debug builds and gave a wrong byte count in ReleaseFast. Fixed by computing in `usize`.
 - Overflow-checked level and bit-pack sizes: `bitPackedSize` returns `error.Overflow`, and V2 level cursor checks are overflow-safe.
 - Out-of-memory leaks: footer parsers (`ColumnChunk`, `Statistics`, `RowGroup`, `SchemaElement`, `KeyValue`, `FileMetaData`) free partial allocations; nested assembly frees the partial list item and struct field; dynamic decoders free def/rep levels and page results.

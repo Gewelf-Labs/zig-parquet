@@ -424,3 +424,24 @@ test "DynamicReader: dictionary encoded data roundtrip" {
     try std.testing.expectEqualStrings("B", rows[3].getColumn(1).?.asBytes().?);
     try std.testing.expectEqualStrings("A", rows[4].getColumn(1).?.asBytes().?);
 }
+
+// =============================================================================
+// Test: allocation failure while reading a nested column frees everything
+// =============================================================================
+
+fn readNestedOnce(allocator: std.mem.Allocator, buf: []const u8) !void {
+    var reader = try parquet.openBufferDynamic(allocator, buf, .{});
+    defer reader.deinit();
+    const rows = try reader.readAllRows(0);
+    defer {
+        for (rows) |row| row.deinit();
+        allocator.free(rows);
+    }
+}
+
+test "regress: nested column read frees its results when an allocation fails" {
+    const allocator = std.testing.allocator;
+    const buf = try std.Io.Dir.cwd().readFileAlloc(io, "../test-files-arrow/nested/list_int.parquet", allocator, .limited(1 << 20));
+    defer allocator.free(buf);
+    try std.testing.checkAllAllocationFailures(allocator, readNestedOnce, .{buf});
+}

@@ -100,7 +100,7 @@ jobs:
           version: 0.16.0
 
       - name: Check formatting
-        run: zig fmt --check zig-parquet/src zig-parquet/build.zig zig-parquet/bench cli/src cli/build.zig
+        run: zig fmt --check zig-parquet/src zig-parquet/build.zig zig-parquet/bench zig-parquet/fuzz cli/src cli/build.zig
 
   interop:
     runs-on: ubuntu-latest

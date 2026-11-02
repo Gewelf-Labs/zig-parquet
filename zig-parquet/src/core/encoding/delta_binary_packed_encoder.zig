@@ -64,12 +64,12 @@ fn encodeGeneric(comptime T: type, allocator: std.mem.Allocator, values: []const
         return buffer.toOwnedSlice(allocator) catch return error.OutOfMemory;
     }
 
-    // Compute deltas
-    const deltas = allocator.alloc(i64, values.len - 1) catch return error.OutOfMemory;
+    // Compute deltas. Spec: deltas wrap at the column's type width (two's complement).
+    const deltas = allocator.alloc(T, values.len - 1) catch return error.OutOfMemory;
     defer allocator.free(deltas);
 
     for (values[1..], 0..) |val, i| {
-        deltas[i] = @as(i64, val) - @as(i64, values[i]);
+        deltas[i] = val -% values[i];
     }
 
     // Process in blocks
@@ -78,7 +78,7 @@ fn encodeGeneric(comptime T: type, allocator: std.mem.Allocator, values: []const
         const block_end = @min(delta_idx + BLOCK_SIZE, deltas.len);
         const block_deltas = deltas[delta_idx..block_end];
 
-        try encodeBlock(&buffer, allocator, block_deltas);
+        try encodeBlock(T, &buffer, allocator, block_deltas);
 
         delta_idx = block_end;
     }
@@ -86,12 +86,23 @@ fn encodeGeneric(comptime T: type, allocator: std.mem.Allocator, values: []const
     return buffer.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
+/// Offset of `d` above `min_delta` (d >= min_delta), as the unsigned bit pattern of T's width.
+/// The wrapping difference is exact modulo 2^N and the true offset lies in [0, 2^N), so this is exact.
+fn relativeDelta(comptime T: type, d: T, min_delta: T) u64 {
+    const U = switch (T) {
+        i32 => u32,
+        i64 => u64,
+        else => @compileError("DELTA_BINARY_PACKED: unsupported type"),
+    };
+    return @as(U, @bitCast(d -% min_delta));
+}
+
 /// Encode a single block of deltas
-fn encodeBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas: []const i64) Error!void {
+fn encodeBlock(comptime T: type, buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas: []const T) Error!void {
     if (deltas.len == 0) return;
 
-    // Find min delta in block
-    var min_delta: i64 = deltas[0];
+    // Find min delta in block (signed, in T)
+    var min_delta: T = deltas[0];
     for (deltas[1..]) |d| {
         min_delta = @min(min_delta, d);
     }
@@ -111,8 +122,7 @@ fn encodeBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas:
         // Find max relative delta to determine bit width
         var max_relative: u64 = 0;
         for (mb_deltas) |d| {
-            const relative: u64 = safe.castTo(u64, d - min_delta) catch unreachable; // d >= min_delta by definition, so difference is non-negative
-            max_relative = @max(max_relative, relative);
+            max_relative = @max(max_relative, relativeDelta(T, d, min_delta));
         }
 
         bit_widths[mini_block_idx] = bitWidth(max_relative);
@@ -132,7 +142,7 @@ fn encodeBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas:
         const mb_deltas = deltas[delta_idx..mb_end];
         const bw = bit_widths[mini_block_idx];
 
-        try packMiniBlock(buffer, allocator, mb_deltas, min_delta, bw);
+        try packMiniBlock(T, buffer, allocator, mb_deltas, min_delta, bw);
 
         mini_block_idx += 1;
         delta_idx = mb_end;
@@ -140,7 +150,7 @@ fn encodeBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas:
 }
 
 /// Pack a mini-block of relative deltas
-fn packMiniBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas: []const i64, min_delta: i64, bit_width: u8) Error!void {
+fn packMiniBlock(comptime T: type, buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, deltas: []const T, min_delta: T, bit_width: u8) Error!void {
     if (bit_width == 0) {
         // All values are min_delta, no bytes needed
         return;
@@ -158,7 +168,7 @@ fn packMiniBlock(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, delta
     var bit_pos: usize = 0;
     for (0..MINI_BLOCK_SIZE) |i| {
         const relative: u64 = if (i < deltas.len)
-            safe.castTo(u64, deltas[i] - min_delta) catch unreachable // deltas[i] >= min_delta by definition
+            relativeDelta(T, deltas[i], min_delta)
         else
             0; // Padding
 
@@ -347,4 +357,49 @@ test "bit width calculation" {
     try std.testing.expectEqual(@as(u8, 3), bitWidth(4));
     try std.testing.expectEqual(@as(u8, 8), bitWidth(255));
     try std.testing.expectEqual(@as(u8, 9), bitWidth(256));
+}
+
+test "regress: dbp i32 extreme deltas round trip" {
+    const allocator = std.testing.allocator;
+    // Deltas overflow i32 (maxInt - minInt, minInt - 0); they wrap at the type width.
+    const values = [_]i32{ std.math.maxInt(i32), std.math.minInt(i32), 0, std.math.maxInt(i32), std.math.minInt(i32) + 1 };
+    const encoded = try encodeInt32(allocator, &values);
+    defer allocator.free(encoded);
+
+    const decoder = @import("delta_binary_packed.zig");
+    const decoded = try decoder.decodeInt32(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualSlices(i32, &values, decoded);
+}
+
+test "regress: dbp i64 extreme deltas round trip" {
+    const allocator = std.testing.allocator;
+    const values = [_]i64{ std.math.maxInt(i64), std.math.minInt(i64), 0, std.math.maxInt(i64), std.math.minInt(i64) + 1 };
+    const encoded = try encodeInt64(allocator, &values);
+    defer allocator.free(encoded);
+
+    const decoder = @import("delta_binary_packed.zig");
+    const decoded = try decoder.decodeInt64(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualSlices(i64, &values, decoded);
+}
+
+test "dbp i64 mini-block bit widths 63 and 64 round trip" {
+    const allocator = std.testing.allocator;
+    // Alternating 0 / 2^61 gives deltas of +-2^61, so relative offsets reach 2^62 (width 63)
+    // and 2^63 (width 64). Width 63 lands on non-zero bit offsets within a mini-block.
+    var values: [128]i64 = undefined;
+    for (&values, 0..) |*v, i| {
+        v.* = if (i % 2 == 1) @as(i64, 1) << 61 else 0;
+    }
+    const encoded = try encodeInt64(allocator, &values);
+    defer allocator.free(encoded);
+
+    const decoder = @import("delta_binary_packed.zig");
+    const decoded = try decoder.decodeInt64(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualSlices(i64, &values, decoded);
 }

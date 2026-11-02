@@ -101,7 +101,6 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
         @sizeOf(c.z_stream),
     );
     if (result != c.Z_OK) {
-        allocator.free(dst);
         return error.CompressionError;
     }
 
@@ -109,7 +108,6 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     result = c.deflate(&stream, c.Z_FINISH);
     if (result != c.Z_STREAM_END) {
         _ = c.deflateEnd(&stream);
-        allocator.free(dst);
         return error.CompressionError;
     }
 
@@ -117,9 +115,7 @@ pub fn compress(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     _ = c.deflateEnd(&stream);
 
     // Resize to actual compressed size
-    const resized = allocator.realloc(dst, compressed_size) catch {
-        return dst[0..compressed_size];
-    };
+    const resized = allocator.realloc(dst, compressed_size) catch return error.OutOfMemory; // errdefer frees dst
     return resized;
 }
 
@@ -147,7 +143,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
 
     // Initialize zlib stream for gzip decompression
     const avail_out = std.math.cast(c_uint, dst.len) orelse {
-        allocator.free(dst);
         return error.DecompressionError;
     };
     var stream: c.z_stream = .{
@@ -170,7 +165,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     // inflateInit2 with gzip format (windowBits = 15 + 16)
     var result = c.inflateInit2_(&stream, GZIP_WINDOW_BITS, zlib_version, @sizeOf(c.z_stream));
     if (result != c.Z_OK) {
-        allocator.free(dst);
         return error.DecompressionError;
     }
 
@@ -189,13 +183,11 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
                 const reset_result = c.inflateReset(&stream);
                 if (reset_result != c.Z_OK) {
                     _ = c.inflateEnd(&stream);
-                    allocator.free(dst);
                     return error.DecompressionError;
                 }
             }
         } else if (result != c.Z_OK) {
             _ = c.inflateEnd(&stream);
-            allocator.free(dst);
             return error.DecompressionError;
         }
     }
@@ -206,7 +198,6 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
 
     // Verify output size matches expected
     if (decompressed_size != uncompressed_size) {
-        allocator.free(dst);
         return error.DecompressionError;
     }
 

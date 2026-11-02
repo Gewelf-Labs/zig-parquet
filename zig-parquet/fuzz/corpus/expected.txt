@@ -1,0 +1,25 @@
+# Expected outcome of every regression input in this tree, asserted by `zig build test`.
+# Format, one per line:  <target>/<file> ok | error.<Name> | error
+#   ok           the input is accepted (runOne returns no error)
+#   error.<Name> rejected with exactly that error
+#   error        rejected, any error
+# An optional third field `needs=<codec>` (gzip, brotli, snappy, lz4, zstd) skips the line when that codec is not built.
+# The file is zig-parquet/fuzz/corpus/<target>/<file>, a minimized raw input (not Smith-encoded).
+thrift/regress-20261102-empty-footer.bin error.EndOfData
+encoding/regress-20261102-dbp-i32-wrap.bin ok
+encoding/regress-20261102-dbp-i64-wrap.bin ok
+thrift/regress-20261102-columnindex-repeat.bin error.EndOfData
+thrift/regress-20261102-columnindex-repeat-2.bin error.EndOfData
+thrift/regress-20261102-offsetindex-repeat.bin error.EndOfData
+thrift/regress-20261102-pageheader-error-path.bin error.EndOfData
+codec/regress-20261102-gzip-cl-tree-overflow.bin ok needs=gzip
+codec/regress-20261102-brotli-cl-length-overrun.bin error.DecompressionError needs=brotli
+codec/regress-20261102-gzip-flate-truncated-overflow.bin error.DecompressionError needs=gzip
+file/regress-20261102-geography-crs-leak.bin ok
+page/regress-20261102-bss-f64-levels-leak.bin error.InvalidArgument
+page/regress-20261102-dict-f64-levels-leak.bin error.InvalidBitWidth
+page/regress-20261102-v2-bytearray-partial-leak.bin error.EndOfData
+file/regress-20261102-page-values-exceed-chunk-a.bin error.InvalidPageSize
+file/regress-20261102-page-values-exceed-chunk-b.bin error.InvalidPageSize
+file/regress-20261102-chunk-outside-file.bin error.InvalidPageSize
+file/regress-20261102-row-count-unbacked.bin error.InvalidRowCount

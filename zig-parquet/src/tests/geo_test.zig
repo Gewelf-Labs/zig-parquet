@@ -299,3 +299,16 @@ test "Writer tracks bbox for geometry column" {
     const has_bbox = std.mem.indexOf(u8, data, "bbox") != null;
     try std.testing.expect(has_bbox);
 }
+
+test "regress: geography crs freed on reader deinit" {
+    const io = std.testing.io;
+    const file = std.Io.Dir.cwd().openFile(io, "../test-files-wild/parquet-testing/data/geospatial/crs-arbitrary-value.parquet", .{}) catch |err| {
+        std.debug.print("Could not open test file: {}\n", .{err});
+        return err;
+    };
+    defer file.close(io);
+
+    // The CRS string in the schema is owned by the footer metadata; testing.allocator fails the test if deinit misses it.
+    var reader = try parquet.openFileDynamic(std.testing.allocator, file, io, .{});
+    reader.deinit();
+}

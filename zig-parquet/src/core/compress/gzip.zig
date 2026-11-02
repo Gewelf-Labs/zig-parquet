@@ -282,7 +282,19 @@ const HuffmanTree = struct {
         return min_pos;
     }
 
+    /// Code lengths limited to `max_bits`. Clamping a deeper tree's lengths would oversubscribe the
+    /// code (an invalid stream every inflater rejects), so instead flatten the frequencies and
+    /// rebuild until the tree fits. Converges: all-equal frequencies give depth ceil(log2(n)).
     fn build(self: *HuffmanTree, max_bits: u5) !void {
+        while (try self.buildOnce() > max_bits) {
+            for (self.freq.items) |*f| {
+                if (f.* > 0) f.* = (f.* >> 1) | 1;
+            }
+        }
+    }
+
+    /// Builds an unrestricted Huffman tree and returns its depth.
+    fn buildOnce(self: *HuffmanTree) !u32 {
         var nodes: std.ArrayList(HuffmanNode) = .empty;
         defer nodes.deinit(self.allocator);
 
@@ -331,37 +343,27 @@ const HuffmanTree = struct {
             try heap.append(self.allocator, nodes.items.len - 1);
         }
 
-        // Assign code lengths by tree traversal
-        if (heap.items.len > 0) {
-            var len_count: std.ArrayList(u32) = .empty;
-            defer len_count.deinit(self.allocator);
-            try len_count.resize(self.allocator, max_bits + 1);
-            @memset(len_count.items, 0);
-
-            try self.assignLengths(&nodes, heap.items[0], 0, max_bits, &len_count);
-        }
+        // Assign code lengths by tree traversal (the loop above leaves exactly one root)
+        return self.assignLengths(nodes.items, heap.items[0], 0);
     }
 
-    fn assignLengths(self: *HuffmanTree, nodes: *std.ArrayList(HuffmanNode), node_idx: usize, depth: u32, max_bits: u5, len_count: *std.ArrayList(u32)) !void {
-        const node = nodes.items[node_idx];
+    /// Stores each leaf's depth as its code length (saturated at 31; `build` rejects a tree that
+    /// deep anyway) and returns the subtree's depth.
+    fn assignLengths(self: *HuffmanTree, nodes: []const HuffmanNode, node_idx: usize, depth: u32) u32 {
+        const node = nodes[node_idx];
 
         if (node.left == null and node.right == null) {
             // Leaf node (symbol)
             const sym_idx = node.symbol;
             if (sym_idx < self.len.items.len and self.freq.items[sym_idx] > 0) {
-                self.len.items[sym_idx] = @intCast(@min(depth, max_bits));
-                if (depth <= max_bits) {
-                    len_count.items[@intCast(depth)] += 1;
-                }
+                self.len.items[sym_idx] = @intCast(@min(depth, 31));
             }
-        } else {
-            if (node.left) |left_idx| {
-                try self.assignLengths(nodes, left_idx, depth + 1, max_bits, len_count);
-            }
-            if (node.right) |right_idx| {
-                try self.assignLengths(nodes, right_idx, depth + 1, max_bits, len_count);
-            }
+            return depth;
         }
+        var max_depth = depth;
+        if (node.left) |left_idx| max_depth = @max(max_depth, self.assignLengths(nodes, left_idx, depth + 1));
+        if (node.right) |right_idx| max_depth = @max(max_depth, self.assignLengths(nodes, right_idx, depth + 1));
+        return max_depth;
     }
 
     fn genCodes(self: *HuffmanTree) void {
@@ -867,14 +869,22 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
     var out: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(allocator, uncompressed_size) catch return error.OutOfMemory;
     errdefer out.deinit();
 
+    // Zig 0.16's flate decoder panics (integer overflow in peekBitsEnding) on a stream that ends
+    // mid-symbol: its tossBitsShort bound reads `bufferedLen() * 8 + consumed_bits` where 0.17 has
+    // `-`. It only takes that path after a 4-byte bit peek hits EndOfStream, which a valid member
+    // never does: its 8-byte footer follows the deflate data. So read from a copy with spare
+    // capacity behind a stream that always fails: running off the end is error.ReadFailed.
+    const input = allocator.alloc(u8, compressed.len + 8) catch return error.OutOfMemory;
+    defer allocator.free(input);
+    @memcpy(input[0..compressed.len], compressed);
+    var in: std.Io.Reader = .{ .vtable = std.Io.Reader.failing.vtable, .buffer = input, .seek = 0, .end = compressed.len };
+
     // Handle concatenated gzip members (RFC 1952 §2.2)
     // Use .gzip container mode so std.compress.flate handles header/footer parsing.
-    var in: std.Io.Reader = .fixed(compressed);
-
     while (true) {
         // Check if there's another gzip member (need at least magic + method = 3 bytes)
         if (in.seek >= in.end) break;
-        const remaining = compressed[in.seek..];
+        const remaining = in.buffered();
         if (remaining.len < 10) break;
         if (remaining[0] != 0x1f or remaining[1] != 0x8b) break;
 
@@ -922,6 +932,62 @@ test "gzip rejects corrupted payload" {
     compressed[10] ^= 0x01;
 
     try std.testing.expectError(error.DecompressionError, decompress(allocator, compressed, original.len));
+}
+
+test "gzip rejects every truncation of a valid stream" {
+    const allocator = std.testing.allocator;
+    var data: [2000]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @truncate(i * i >> 3);
+    const compressed = try compress(allocator, &data);
+    defer allocator.free(compressed);
+
+    // Under 10 bytes there is no member header: nothing to decode, empty output.
+    for (10..compressed.len) |n| {
+        try std.testing.expectError(error.DecompressionError, decompress(allocator, compressed[0..n], data.len));
+    }
+}
+
+test "huffman code lengths respect max_bits and stay a complete prefix code" {
+    var tree = try HuffmanTree.init(std.testing.allocator, BL_CODES);
+    defer tree.deinit();
+    // Fibonacci frequencies: the unrestricted tree is 18 levels deep.
+    var a: u32 = 1;
+    var b: u32 = 1;
+    for (tree.freq.items) |*f| {
+        f.* = a;
+        const next = a + b;
+        a = b;
+        b = next;
+    }
+    try tree.build(MAX_BL_BITS);
+    var kraft: u32 = 0;
+    for (tree.len.items) |l| {
+        try std.testing.expect(l >= 1 and l <= MAX_BL_BITS);
+        kraft += @as(u32, 1) << (MAX_BL_BITS - l);
+    }
+    try std.testing.expectEqual(@as(u32, 1) << MAX_BL_BITS, kraft);
+}
+
+test "regress: gzip-cl-tree-overflow round trips through our and std's inflate" {
+    // Fuzz finding: the code-length tree was 8 deep, its lengths were clamped to 7, and the
+    // oversubscribed code made every inflater (std, zlib) reject our own output.
+    const allocator = std.testing.allocator;
+    var payload: [202]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&payload, "a0403e72a0cfe71bd9fb378a75901381c00f00002c597df0a5e366b900edc866b954f83658506b340048b83b2027bb1a71a2168e2f305bf59bd9c7a0cc056f3455d0425fe8ade32f58025e7c89440db4e300a77a2e8c9c5a505d5220a48d59aaaf6c80432b2d943a73d8bab50b7bd1a5f3e7598158f6663b31cd08c4ee51d489b7514ea3986403c6a08d5819090911f27a82ba1e38bf4563452ac826b7e582d5b66db6bfe90f2ade94c9bf6943fc4b614efe025357cf7606f0d4e565a0cc05def5647e4255c821b14003");
+
+    const compressed = try compress(allocator, &payload);
+    defer allocator.free(compressed);
+
+    const ours = try decompress(allocator, compressed, payload.len);
+    defer allocator.free(ours);
+    try std.testing.expectEqualSlices(u8, &payload, ours);
+
+    var in: std.Io.Reader = .fixed(compressed);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var inflate: std.compress.flate.Decompress = .init(&in, .gzip, &.{});
+    _ = try inflate.reader.streamRemaining(&out.writer);
+    try std.testing.expectEqualSlices(u8, &payload, out.written());
 }
 
 test "gzip empty data" {

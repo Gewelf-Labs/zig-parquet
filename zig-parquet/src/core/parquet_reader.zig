@@ -152,6 +152,10 @@ pub fn readColumnChunkData(
 
     const size = try safe.cast(meta.total_compressed_size);
 
+    // The chunk must lie inside the file: a footer-declared size must not size the buffer first.
+    const end = std.math.add(u64, start_offset, size) catch return error.InvalidPageSize;
+    if (end > source.size()) return error.InvalidPageSize;
+
     // Read the data
     const data = allocator.alloc(u8, size) catch return error.OutOfMemory;
     errdefer allocator.free(data);

@@ -119,54 +119,7 @@ pub const DynamicReader = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        // Free schema element names
-        for (self.metadata.schema) |elem| {
-            if (elem.name.len > 0) {
-                self.allocator.free(elem.name);
-            }
-        }
-        self.allocator.free(self.metadata.schema);
-
-        // Free row groups
-        for (self.metadata.row_groups) |rg| {
-            for (rg.columns) |col| {
-                if (col.file_path) |fp| self.allocator.free(fp);
-                if (col.meta_data) |meta| {
-                    self.allocator.free(meta.encodings);
-                    for (meta.path_in_schema) |path| {
-                        self.allocator.free(path);
-                    }
-                    self.allocator.free(meta.path_in_schema);
-                    if (meta.statistics) |stats| {
-                        if (stats.max) |m| self.allocator.free(m);
-                        if (stats.min) |m| self.allocator.free(m);
-                        if (stats.max_value) |m| self.allocator.free(m);
-                        if (stats.min_value) |m| self.allocator.free(m);
-                    }
-                    // Free geospatial statistics if present
-                    if (meta.geospatial_statistics) |geo_stats| {
-                        if (geo_stats.geospatial_types) |gt| self.allocator.free(gt);
-                    }
-                }
-            }
-            if (rg.sorting_columns) |sc| self.allocator.free(sc);
-            self.allocator.free(rg.columns);
-        }
-        self.allocator.free(self.metadata.row_groups);
-
-        // Free key-value metadata
-        if (self.metadata.key_value_metadata) |kvs| {
-            for (kvs) |kv| {
-                self.allocator.free(kv.key);
-                if (kv.value) |v| self.allocator.free(v);
-            }
-            self.allocator.free(kvs);
-        }
-
-        // Free created_by
-        if (self.metadata.created_by) |cb| {
-            self.allocator.free(cb);
-        }
+        self.metadata.deinit(self.allocator);
 
         self.allocator.free(self.footer_data);
 
@@ -710,6 +663,9 @@ pub const DynamicReader = struct {
         if (try self.planFlatLeaves(num_leaf_columns, col_indices)) |leaves| {
             defer self.allocator.free(leaves);
             try self.readFlatColumns(row_group_index, leaves, column_values);
+            // The footer's row count must be backed by decoded values before it sizes any array;
+            // every row has at least one entry in each leaf column.
+            for (leaves) |leaf| if (column_values[leaf].len < num_rows) return error.InvalidRowCount;
             return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, leaves, rows_arena);
         }
 
@@ -758,6 +714,9 @@ pub const DynamicReader = struct {
             column_values[col_idx] = result.values;
             column_def_levels[col_idx] = result.def_levels;
             column_rep_levels[col_idx] = result.rep_levels;
+        }
+        for (0..num_leaf_columns) |col_idx| {
+            if (leaf_needed[col_idx] and column_values[col_idx].len < num_rows) return error.InvalidRowCount; // as for flat columns
         }
 
         return self.assembleNestedRows(
@@ -1027,6 +986,10 @@ pub const DynamicReader = struct {
         var all_rep_levels: std.ArrayListUnmanaged(u32) = .empty;
         errdefer all_rep_levels.deinit(self.allocator);
 
+        // A page cannot hold more values than the chunk declares. Without this a header
+        // that claims 2^31 values makes the decoders allocate arrays that size from a few bytes.
+        var values_left = try safeRowCount(meta.num_values);
+
         // Loop through all data pages
         while (pos < page_data.len) {
             // Parse data page header
@@ -1069,6 +1032,8 @@ pub const DynamicReader = struct {
                 const num_values = try safePageSize(v2.num_values);
 
                 if (num_values == 0) continue;
+                if (num_values > values_left) return error.InvalidPageSize;
+                values_left -= num_values;
 
                 // Extract level data (uncompressed, at start of page body)
                 const rep_levels_data = try safe.slice(compressed_body, 0, rep_len);
@@ -1156,6 +1121,8 @@ pub const DynamicReader = struct {
 
                 const num_values = try safePageSize(dph.num_values);
                 if (num_values == 0) continue;
+                if (num_values > values_left) return error.InvalidPageSize;
+                values_left -= num_values;
 
                 // Get encodings from page header
                 const uses_dict_v1 = string_dict != null or int32_dict != null or int64_dict != null or float32_dict != null or float64_dict != null or fixed_byte_array_dict != null or int96_dict != null;
@@ -1209,11 +1176,17 @@ pub const DynamicReader = struct {
             }
         }
 
-        return .{
-            .values = try all_values.toOwnedSlice(self.allocator),
-            .def_levels = if (all_def_levels.items.len > 0) try all_def_levels.toOwnedSlice(self.allocator) else null,
-            .rep_levels = if (all_rep_levels.items.len > 0) try all_rep_levels.toOwnedSlice(self.allocator) else null,
-        };
+        // Each toOwnedSlice empties its list (and its errdefer above), so own the results
+        // here until the struct is returned.
+        const values = try all_values.toOwnedSlice(self.allocator);
+        errdefer {
+            for (values) |v| v.deinit(self.allocator);
+            self.allocator.free(values);
+        }
+        const def_levels: ?[]u32 = if (all_def_levels.items.len > 0) try all_def_levels.toOwnedSlice(self.allocator) else null;
+        errdefer if (def_levels) |dl| self.allocator.free(dl);
+        const rep_levels: ?[]u32 = if (all_rep_levels.items.len > 0) try all_rep_levels.toOwnedSlice(self.allocator) else null;
+        return .{ .values = values, .def_levels = def_levels, .rep_levels = rep_levels };
     }
 
     /// Assemble rows from columnar data.
@@ -1388,6 +1361,7 @@ pub const DynamicReader = struct {
                 error.InvalidArgument => error.InvalidArgument,
                 error.OutOfMemory => error.OutOfMemory,
                 error.InputOutput => error.InputOutput,
+                error.InvalidPageSize => error.InvalidPageSize,
                 else => error.InputOutput,
             };
         };

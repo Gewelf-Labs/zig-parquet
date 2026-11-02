@@ -59,6 +59,25 @@ fn ownsBytes() bool {
     return !borrow_bytes and value_mod.bytes_arena_allocator == null;
 }
 
+/// Allocate `n` Values all set to null, so an error part-way through filling them
+/// leaves no slot holding undefined bytes for `freePartialValues`.
+fn allocNullValues(allocator: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]Value {
+    const values = try allocator.alloc(Value, n);
+    @memset(values, .{ .null_val = {} });
+    return values;
+}
+
+/// errdefer cleanup for a value array filled by `allocNullValues`: frees the byte payloads
+/// stored so far (when they are individual allocations) and the array. Producers must
+/// evaluate a fallible payload into a local before writing the slot (HARDENING rule 6).
+fn freePartialValues(allocator: std.mem.Allocator, values: []Value) void {
+    if (ownsBytes()) for (values) |v| switch (v) {
+        .bytes_val, .fixed_bytes_val => |b| allocator.free(b),
+        else => {},
+    };
+    allocator.free(values);
+}
+
 /// Free a typed decode result's levels (after a later step failed).
 fn freeLevels(allocator: std.mem.Allocator, def_levels: ?[]u32, rep_levels: ?[]u32) void {
     if (def_levels) |dl| allocator.free(dl);
@@ -1221,8 +1240,8 @@ fn decodeDeltaEncodedValuesV2(
     non_null_count: usize,
     value_encoding: format.Encoding,
 ) ![]Value {
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     switch (value_encoding) {
         .delta_binary_packed => {
@@ -1608,8 +1627,8 @@ fn decodeDynamicDoubleV2(allocator: std.mem.Allocator, values_data: []const u8, 
 }
 
 fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u8, num_values: usize, def_mask: []const bool, non_null_count: usize, uses_dict: bool, string_dict: ?*dictionary.StringDictionary) ![]Value {
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     if (uses_dict and string_dict != null) {
         const bit_width = try extractBitWidth(values_data, 0);
@@ -1648,8 +1667,8 @@ fn decodeDynamicByteArrayV2(allocator: std.mem.Allocator, values_data: []const u
 }
 
 fn decodeDynamicFixedByteArrayV2(allocator: std.mem.Allocator, schema_elem: format.SchemaElement, values_data: []const u8, num_values: usize, def_mask: []const bool, non_null_count: usize, uses_dict: bool, fixed_byte_array_dict: ?*dictionary.FixedByteArrayDictionary) ![]Value {
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     if (uses_dict and fixed_byte_array_dict != null) {
         const bit_width = try extractBitWidth(values_data, 0);
@@ -1936,6 +1955,7 @@ fn decodeDynamicBoolRLE(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2171,6 +2191,7 @@ fn decodeDictFloat32(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2222,6 +2243,7 @@ fn decodeDictFloat64(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2396,8 +2418,8 @@ fn decodeDynamicFixedByteArray(
         defer allocator.free(indices);
 
         // Build output values
-        const values = try allocator.alloc(Value, num_values);
-        errdefer allocator.free(values);
+        const values = try allocNullValues(allocator, num_values);
+        errdefer freePartialValues(allocator, values);
 
         var idx_pos: usize = 0;
         for (0..num_values) |i| {
@@ -2492,6 +2514,7 @@ fn decodeDynamicInt96(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2532,6 +2555,7 @@ fn decodeDictInt96(
 ) !DynamicDecodeResult {
     const levels_info = try decodeLevelsForDynamicWithEncoding(allocator, value_data, num_values, max_def_level, max_rep_level, def_level_encoding, rep_level_encoding);
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values = try allocator.alloc(Value, num_values);
     errdefer allocator.free(values);
@@ -2654,6 +2678,7 @@ fn decodeDeltaBinaryPacked(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
     const values = try allocator.alloc(Value, num_values);
@@ -2739,10 +2764,11 @@ fn decodeDeltaLengthByteArray(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     // Decode using delta length byte array decoder
     var decode_result = delta_length_byte_array.decode(allocator, values_data) catch |err| {
@@ -2800,10 +2826,11 @@ fn decodeDeltaByteArray(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     // Decode using delta byte array decoder
     var decode_result = delta_byte_array.decode(allocator, values_data) catch |err| {
@@ -2861,10 +2888,11 @@ fn decodeByteStreamSplit(
         rep_level_encoding,
     );
     defer allocator.free(levels_info.def_mask);
+    errdefer freeLevels(allocator, levels_info.def_levels, levels_info.rep_levels);
 
     const values_data = value_data[levels_info.data_offset..];
-    const values = try allocator.alloc(Value, num_values);
-    errdefer allocator.free(values);
+    const values = try allocNullValues(allocator, num_values);
+    errdefer freePartialValues(allocator, values);
 
     if (physical_type == .float) {
         const decoded = byte_stream_split.decodeFloat32Alloc(allocator, values_data, levels_info.non_null_count) catch |err| {

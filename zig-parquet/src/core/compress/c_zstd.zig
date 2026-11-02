@@ -42,13 +42,10 @@ pub fn compressWithLevel(allocator: std.mem.Allocator, data: []const u8, level: 
     );
 
     if (c.ZSTD_isError(result) != 0) {
-        allocator.free(dst);
         return error.CompressionError;
     }
 
-    const resized = allocator.realloc(dst, result) catch {
-        return dst[0..result];
-    };
+    const resized = allocator.realloc(dst, result) catch return error.OutOfMemory; // errdefer frees dst
     return resized;
 }
 
@@ -68,13 +65,11 @@ pub fn decompress(allocator: std.mem.Allocator, compressed: []const u8, uncompre
 
     // Check for errors
     if (c.ZSTD_isError(result) != 0) {
-        allocator.free(dst);
         return error.DecompressionError;
     }
 
     // Verify output size matches expected
     if (result != uncompressed_size) {
-        allocator.free(dst);
         return error.DecompressionError;
     }
 

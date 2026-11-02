@@ -105,7 +105,7 @@ pub const OffsetIndex = struct {
                     for (0..list_header.size) |i| {
                         locs[i] = try PageLocation.parse(reader);
                     }
-                    oi.page_locations = locs;
+                    replaceSlice(PageLocation, allocator, &oi.page_locations, locs);
                 },
                 2 => {
                     const list_header = try reader.readListHeader();
@@ -115,7 +115,7 @@ pub const OffsetIndex = struct {
                     for (0..list_header.size) |i| {
                         vals[i] = try reader.readI64();
                     }
-                    oi.unencoded_byte_array_data_bytes = vals;
+                    replaceOptSlice(i64, allocator, &oi.unencoded_byte_array_data_bytes, vals);
                 },
                 else => try reader.skip(field.field_type),
             }
@@ -163,10 +163,8 @@ pub const ColumnIndex = struct {
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         if (self.null_pages.len > 0) allocator.free(self.null_pages);
-        for (self.min_values) |v| allocator.free(v);
-        if (self.min_values.len > 0) allocator.free(self.min_values);
-        for (self.max_values) |v| allocator.free(v);
-        if (self.max_values.len > 0) allocator.free(self.max_values);
+        freeBinaryList(allocator, self.min_values);
+        freeBinaryList(allocator, self.max_values);
         if (self.null_counts) |v| allocator.free(v);
         if (self.repetition_level_histograms) |v| allocator.free(v);
         if (self.definition_level_histograms) |v| allocator.free(v);
@@ -182,13 +180,13 @@ pub const ColumnIndex = struct {
 
         while (try reader.readFieldHeader()) |field| {
             switch (field.field_id) {
-                1 => ci.null_pages = try readBoolList(allocator, reader),
-                2 => ci.min_values = try readBinaryList(allocator, reader),
-                3 => ci.max_values = try readBinaryList(allocator, reader),
+                1 => replaceSlice(bool, allocator, &ci.null_pages, try readBoolList(allocator, reader)),
+                2 => replaceBinaryList(allocator, &ci.min_values, try readBinaryList(allocator, reader)),
+                3 => replaceBinaryList(allocator, &ci.max_values, try readBinaryList(allocator, reader)),
                 4 => ci.boundary_order = try BoundaryOrder.fromInt(try reader.readI32()),
-                5 => ci.null_counts = try readI64List(allocator, reader),
-                6 => ci.repetition_level_histograms = try readI64List(allocator, reader),
-                7 => ci.definition_level_histograms = try readI64List(allocator, reader),
+                5 => replaceOptSlice(i64, allocator, &ci.null_counts, try readI64List(allocator, reader)),
+                6 => replaceOptSlice(i64, allocator, &ci.repetition_level_histograms, try readI64List(allocator, reader)),
+                7 => replaceOptSlice(i64, allocator, &ci.definition_level_histograms, try readI64List(allocator, reader)),
                 else => try reader.skip(field.field_type),
             }
         }
@@ -258,6 +256,27 @@ fn writeBoolList(writer: *thrift.CompactWriter, values: []const bool) !void {
     for (values) |v| {
         try writer.writeByte(if (v) @as(u8, 0x01) else @as(u8, 0x02));
     }
+}
+
+// A repeated Thrift field replaces the value parsed earlier, so free that one first.
+fn replaceSlice(comptime T: type, allocator: std.mem.Allocator, slot: *[]T, value: []T) void {
+    if (slot.*.len > 0) allocator.free(slot.*);
+    slot.* = value;
+}
+
+fn replaceOptSlice(comptime T: type, allocator: std.mem.Allocator, slot: *?[]T, value: []T) void {
+    if (slot.*) |old| allocator.free(old);
+    slot.* = value;
+}
+
+fn replaceBinaryList(allocator: std.mem.Allocator, slot: *[][]const u8, value: [][]const u8) void {
+    freeBinaryList(allocator, slot.*);
+    slot.* = value;
+}
+
+fn freeBinaryList(allocator: std.mem.Allocator, list: [][]const u8) void {
+    for (list) |v| allocator.free(v);
+    if (list.len > 0) allocator.free(list);
 }
 
 fn readBinaryList(allocator: std.mem.Allocator, reader: *thrift.CompactReader) ![][]const u8 {
