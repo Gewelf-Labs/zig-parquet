@@ -32,6 +32,8 @@ pub const StringDictionary = struct {
     }
 
     fn init(allocator: std.mem.Allocator, data: []const u8, num_values: usize, copy: bool) !Self {
+        // Every entry has a 4-byte length prefix, so the data bounds the count before it sizes the array.
+        if (num_values > data.len / 4) return error.EndOfData;
         var values = try allocator.alloc([]const u8, num_values);
         var initialized: usize = 0;
         errdefer {
@@ -316,6 +318,13 @@ test "StringDictionary basic" {
     try std.testing.expectEqualStrings("hello", dict.get(0).?);
     try std.testing.expectEqualStrings("world", dict.get(1).?);
     try std.testing.expectEqual(@as(?[]const u8, null), dict.get(2));
+}
+
+test "regress: StringDictionary count is bounded by the page before it sizes the array" {
+    // 2^31 entries claimed by 8 bytes of data: must fail on the count, not by trying to allocate 32 GB.
+    const data: [8]u8 = @splat(0);
+    try std.testing.expectError(error.EndOfData, StringDictionary.fromPlain(std.testing.allocator, &data, 1 << 31));
+    try std.testing.expectError(error.EndOfData, StringDictionary.fromPlainBorrowed(std.testing.allocator, &data, 3));
 }
 
 test "StringDictionary borrowed entries point into the page" {
