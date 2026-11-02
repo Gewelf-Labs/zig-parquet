@@ -663,6 +663,9 @@ pub const DynamicReader = struct {
         if (try self.planFlatLeaves(num_leaf_columns, col_indices)) |leaves| {
             defer self.allocator.free(leaves);
             try self.readFlatColumns(row_group_index, leaves, column_values);
+            // The footer's row count must be backed by decoded values before it sizes any array;
+            // every row has at least one entry in each leaf column.
+            for (leaves) |leaf| if (column_values[leaf].len < num_rows) return error.InvalidRowCount;
             return self.assembleFlatRows(num_rows, num_leaf_columns, column_values, leaves, rows_arena);
         }
 
@@ -711,6 +714,9 @@ pub const DynamicReader = struct {
             column_values[col_idx] = result.values;
             column_def_levels[col_idx] = result.def_levels;
             column_rep_levels[col_idx] = result.rep_levels;
+        }
+        for (0..num_leaf_columns) |col_idx| {
+            if (leaf_needed[col_idx] and column_values[col_idx].len < num_rows) return error.InvalidRowCount; // as for flat columns
         }
 
         return self.assembleNestedRows(

@@ -21,3 +21,4 @@ page/regress-20261102-v2-bytearray-partial-leak.bin error.EndOfData
 file/regress-20261102-page-values-exceed-chunk-a.bin error.InvalidPageSize
 file/regress-20261102-page-values-exceed-chunk-b.bin error.InvalidPageSize
 file/regress-20261102-chunk-outside-file.bin error.InputOutput
+file/regress-20261102-row-count-unbacked.bin error.InvalidRowCount
