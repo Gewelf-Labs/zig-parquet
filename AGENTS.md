@@ -30,6 +30,7 @@ zig-parquet is a native Parquet library written in Zig 0.16.0. It provides read/
 - `ROADMAP.md` - Development phases and progress
 - `zig-parquet/HARDENING.md` - Hardening guidelines
 - `test-files-wild/README.md` - Test file validation status
+- `docs/previous-art/` - Prior projects and research on what we are building (read before designing tests or features)
 
 ### References
 
