@@ -15,6 +15,9 @@ __pycache__/
 *.py[cod]
 .zig17/
 
+# Fuzzing
+.fuzz-out/
+
 # Benchmarks
 bench/rust/target/
 bench/js/node_modules/

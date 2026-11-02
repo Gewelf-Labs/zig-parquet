@@ -41,6 +41,9 @@ help:
 	@echo "  make bench-js-workerd [ROWS=n]   The same in workerd"
 	@echo "  make validate-wild     Validate pqi against wild files (failures only)"
 	@echo "  make validate-wild-all Validate pqi against wild files (show all)"
+	@echo "  make fuzz-run TARGET=<t> [SECONDS=60] [SEED=n]  Seeded mutation fuzzing (any OS; ReleaseSafe, zig-only)"
+	@echo "  make fuzz-replay TARGET=<t> FILES=<file|dir>   Replay inputs through a fuzz target"
+	@echo "  make fuzz-cov [N=200K] Coverage-guided fuzzing via zig build --fuzz (Linux/macOS only)"
 	@echo "  make fmt               zig fmt across sources (requires ZIG=<0.16 zig>)"
 	@echo "  make clean             Remove .zig-cache and zig-out everywhere"
 	@echo ""
@@ -122,7 +125,25 @@ validate-wild-all: cli
 .PHONY: fmt
 fmt:
 	@case "$(ZIG_VERSION)" in 0.16.*) ;; *) echo "make fmt needs Zig 0.16 (0.17 fmt emits 0.17-only builtins): make fmt ZIG=<0.16 zig>"; exit 1;; esac
-	$(ZIG) fmt $(LIB_DIR)/src $(LIB_DIR)/build.zig $(LIB_DIR)/bench $(CLI_DIR)/src $(CLI_DIR)/build.zig
+	$(ZIG) fmt $(LIB_DIR)/src $(LIB_DIR)/build.zig $(LIB_DIR)/bench $(LIB_DIR)/fuzz $(CLI_DIR)/src $(CLI_DIR)/build.zig
+
+FUZZ_CACHE = $(if $(filter 0.16.%,$(ZIG_VERSION)),$(LIB_DIR)/.zig-cache,.zig17/cache)
+
+.PHONY: fuzz-run fuzz-replay fuzz-cov
+fuzz-run:
+	@test -n "$(TARGET)" || { echo "usage: make fuzz-run TARGET=<target> [SECONDS=60] [SEED=n] [OPT=ReleaseSafe]"; exit 1; }
+	cd $(LIB_DIR) && $(ZIG) build fuzz $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -Doptimize=$(or $(OPT),ReleaseSafe) -- $(TARGET) run $(or $(SECONDS),60)s --out .fuzz-out/$(TARGET) $(if $(SEED),--seed $(SEED))
+
+fuzz-replay:
+	@test -n "$(TARGET)" -a -n "$(FILES)" || { echo "usage: make fuzz-replay TARGET=<target> FILES=<file|dir>"; exit 1; }
+	cd $(LIB_DIR) && $(ZIG) build fuzz $(call zcache,..) -Dcodecs=$(or $(CODECS),zig-only) -- $(TARGET) replay $(FILES)
+
+# Zig's coverage-guided fuzzer. Linux/macOS only. 0.16 needs ReleaseSafe (Debug -ffuzz does not compile).
+# `zig build --fuzz=N` exits 0 even on a crash, so check for the saved input.
+fuzz-cov:
+	rm -f $(FUZZ_CACHE)/f/crash
+	cd $(LIB_DIR) && $(ZIG) build fuzz-cov $(call zcache,..) -Dcodecs=zig-only -Doptimize=$(or $(OPT),ReleaseSafe) --fuzz=$(or $(N),200K)
+	@if test -e $(FUZZ_CACHE)/f/crash; then mkdir -p $(LIB_DIR)/.fuzz-out; tail -c +5 $(FUZZ_CACHE)/f/crash > $(LIB_DIR)/.fuzz-out/cov-crash.bin; echo "fuzz-cov: finding saved to $(LIB_DIR)/.fuzz-out/cov-crash.bin"; exit 1; fi
 
 .PHONY: clean
 clean:

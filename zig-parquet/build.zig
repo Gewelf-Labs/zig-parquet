@@ -193,6 +193,28 @@ pub fn build(b: *std.Build) void {
         b.step("bench", "Build and run the benchmark harness").dependOn(&bench_run.step);
     }
 
+    // Fuzzing (HARDENING.md "Fuzzing"): harness exe + std.testing.fuzz tests, one runOne per target.
+    {
+        const fuzz_mod = b.createModule(.{
+            .root_source_file = b.path("fuzz/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        fuzz_mod.addImport("parquet", parquet_mod);
+        fuzz_mod.addImport("build_options", build_options.createModule());
+        const fuzz_exe = b.addExecutable(.{ .name = "zp-fuzz", .root_module = fuzz_mod });
+        const fuzz_run = b.addRunArtifact(fuzz_exe);
+        passArgs(b, fuzz_run);
+        b.step("fuzz", "Fuzz harness: zig build fuzz -- <target> run|replay|gen-seeds ...").dependOn(&fuzz_run.step);
+        b.step("fuzz-install", "Install zig-out/bin/zp-fuzz (used by fuzz/minimize.py)").dependOn(&b.addInstallArtifact(fuzz_exe, .{}).step);
+
+        const fuzz_tests = b.addTest(.{ .root_module = fuzz_mod });
+        const fuzz_tests_run = b.addRunArtifact(fuzz_tests);
+        fuzz_tests_run.step.dependOn(&check_test_files.step);
+        test_step.dependOn(&fuzz_tests_run.step); // corpus replay + expected.txt on every `zig build test`
+        b.step("fuzz-cov", "Coverage-guided: zig build fuzz-cov --fuzz=N -Dcodecs=zig-only (Linux/macOS)").dependOn(&fuzz_tests_run.step);
+    }
+
     // WASM benchmark module for the JS harness in ../bench/js: zig build bench-wasm
     {
         const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
